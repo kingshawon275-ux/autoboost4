@@ -3,6 +3,11 @@
 // Realtime: services emit events via globalThis.__io; clients subscribe and
 // refresh their data instantly (no polling needed).
 
+// Default to production when launched as the real server (npm run start:server).
+// This avoids needing cross-env on the VPS — set NODE_ENV here before anything
+// reads it. To run this file in dev, set NODE_ENV=development explicitly.
+process.env.NODE_ENV = process.env.NODE_ENV || "production";
+
 const { createServer } = require("http");
 const next = require("next");
 const { Server } = require("socket.io");

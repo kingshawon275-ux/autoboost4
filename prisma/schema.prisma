@@ -1,0 +1,357 @@
+// Auto Boost SMM Platform — Prisma schema (MongoDB)
+// Note: MongoDB connector requires a replica set (Atlas works out of the box).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+enum Role {
+  ADMIN
+  MODERATOR
+  USER
+}
+
+enum PanelStatus {
+  ONLINE
+  OFFLINE
+  ERROR
+  DISABLED
+}
+
+enum OrderStatus {
+  PENDING
+  PROCESSING
+  PARTIAL
+  COMPLETED
+  CANCELED
+  FAILED
+  REFILLED
+}
+
+enum BoostType {
+  LIKE
+  SHARE
+  LOVE
+  WOW
+  CARE
+  HAHA
+  ANGRY
+  COMMENT
+  FOLLOWERS
+  VIEWS
+  CUSTOM
+}
+
+enum TxType {
+  ORDER
+  DEPOSIT
+  REFUND
+  ADJUSTMENT
+}
+
+enum NotificationType {
+  ORDER_COMPLETED
+  ORDER_FAILED
+  BALANCE_LOW
+  API_OFFLINE
+  SERVICE_UNAVAILABLE
+  INFO
+}
+
+// ---------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------
+model User {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  email         String   @unique
+  name          String?
+  // Optional: OAuth (Google) users have no password.
+  passwordHash  String?
+  emailVerified DateTime?
+  image         String?
+  role          Role     @default(USER)
+  twoFactorEnabled Boolean @default(false)
+  twoFactorSecret  String?
+  avatarUrl     String?
+  active        Boolean  @default(true)
+  // Registration approval: self-registered users start unapproved and cannot
+  // log in until an admin approves them.
+  approved      Boolean  @default(false)
+  // Per-user view permissions (USER role only; admins see everything).
+  canDashboard  Boolean  @default(false)
+  canAnalytics  Boolean  @default(false)
+  canPanels     Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  accounts      Account[]
+  sessions      Session[]
+  orders        Order[]
+  activityLogs  ActivityLog[]
+  loginHistory  LoginHistory[]
+  notifications Notification[]
+  transactions  Transaction[]
+  presets       BoostPreset[]
+}
+
+// NextAuth (Auth.js) OAuth models — required by the Prisma adapter.
+model Account {
+  id                String  @id @default(auto()) @map("_id") @db.ObjectId
+  userId            String  @db.ObjectId
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  sessionToken String   @unique
+  userId       String   @db.ObjectId
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// A saved Auto Boost configuration so the admin doesn't re-select everything.
+model BoostPreset {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  name      String
+  platform  String   @default("facebook")
+  panelIds  String[] // selected panel ids
+  boosts    Json     // [{ boostType, quantityMode, fixedQuantity?, minQuantity?, maxQuantity? }]
+  // Manual per-panel mode saved with the preset.
+  manualMode      Boolean @default(false)
+  manualQty       Json?   // { [panelId]: { [boostType]: "qty" } }
+  panelBoosts     Json?   // { [panelId]: { [boostType]: boolean } } (which boosts on per panel)
+  isDefault Boolean  @default(false) // auto-loaded on the Auto Boost page
+  // Short code others can use to import a copy of this preset.
+  // (App-level uniqueness; no DB unique index to avoid Mongo null-dup issues.)
+  shareCode String?
+  userId    String   @db.ObjectId
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+// Global app settings (single document). Controls currency display etc.
+model AppSettings {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  // "USD" shows raw provider cost; "BDT" converts using bdtRate.
+  displayCurrency String @default("USD")
+  bdtRate      Float    @default(120) // 1 USD = bdtRate BDT
+  // Alert when a panel's balance (in its own currency) falls below this.
+  lowBalanceThreshold Float @default(10)
+  // Quick-pick quantity buttons shown on the Auto Boost page.
+  quickQuantities Int[]  @default([500, 1000, 5000, 10000])
+  updatedAt    DateTime @updatedAt
+}
+
+model Panel {
+  id           String      @id @default(auto()) @map("_id") @db.ObjectId
+  name         String
+  apiUrl       String
+  apiKey       String
+  currency     String      @default("USD")
+  notes        String?
+  status       PanelStatus @default(OFFLINE)
+  enabled      Boolean     @default(true)
+  balance      Float       @default(0)
+  successRate  Float       @default(100) // percent, used by distribution engine
+  responseMs   Int         @default(0)
+  priority     Int         @default(0)   // higher = preferred
+  lastSyncedAt DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  services        Service[]
+  serviceMappings ServiceMapping[]
+  orders          Order[]
+  balanceHistory  BalanceSnapshot[]
+  apiLogs         ApiLog[]
+}
+
+model Service {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  panelId     String   @db.ObjectId
+  panel       Panel    @relation(fields: [panelId], references: [id], onDelete: Cascade)
+  serviceId   String   // provider's service id
+  name        String
+  category    String?
+  type        String?
+  rate        Float    @default(0) // cost per 1000
+  min         Int      @default(1)
+  max         Int      @default(100000)
+  refill      Boolean  @default(false)
+  cancel      Boolean  @default(false)
+  raw         Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  mappings    ServiceMapping[]
+
+  @@unique([panelId, serviceId])
+  @@index([category])
+}
+
+// Maps an abstract BoostType to a concrete provider service on a panel.
+model ServiceMapping {
+  id         String    @id @default(auto()) @map("_id") @db.ObjectId
+  boostType  BoostType
+  platform   String    @default("facebook") // facebook | instagram | ...
+  panelId    String    @db.ObjectId
+  panel      Panel     @relation(fields: [panelId], references: [id], onDelete: Cascade)
+  serviceId  String    @db.ObjectId
+  service    Service   @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  enabled    Boolean   @default(true)
+  createdAt  DateTime  @default(now())
+
+  @@index([boostType, platform])
+  @@index([panelId])
+}
+
+// A logical Auto Boost request can fan out into multiple Order rows (one per panel/service).
+model Order {
+  id            String      @id @default(auto()) @map("_id") @db.ObjectId
+  batchId       String?     // groups orders created in one Auto Boost submission
+  postUrl       String
+  platform      String      @default("facebook")
+  boostType     BoostType
+  quantity      Int
+  startCount    Int         @default(0)
+  remains       Int         @default(0)
+  cost          Float       @default(0)
+  status        OrderStatus @default(PENDING)
+  providerOrderId String?
+  errorMessage  String?
+  // Background submission tracking: how many submit attempts, and when to retry.
+  submitAttempts Int        @default(0)
+  nextRetryAt    DateTime?
+
+  panelId       String      @db.ObjectId
+  panel         Panel       @relation(fields: [panelId], references: [id])
+  serviceId     String?     // provider service id used
+  userId        String      @db.ObjectId
+  user          User        @relation(fields: [userId], references: [id])
+
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  logs          OrderLog[]
+
+  @@index([status])
+  @@index([batchId])
+  @@index([createdAt])
+}
+
+model OrderLog {
+  id        String      @id @default(auto()) @map("_id") @db.ObjectId
+  orderId   String      @db.ObjectId
+  order     Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status    OrderStatus
+  message   String?
+  createdAt DateTime    @default(now())
+
+  @@index([orderId])
+}
+
+model BalanceSnapshot {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  panelId   String   @db.ObjectId
+  panel     Panel    @relation(fields: [panelId], references: [id], onDelete: Cascade)
+  balance   Float
+  createdAt DateTime @default(now())
+
+  @@index([panelId, createdAt])
+}
+
+model Transaction {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  type      TxType
+  amount    Float
+  currency  String   @default("USD")
+  note      String?
+  userId    String?  @db.ObjectId
+  user      User?    @relation(fields: [userId], references: [id])
+  orderId   String?  @db.ObjectId
+  panelId   String?  @db.ObjectId
+  createdAt DateTime @default(now())
+
+  @@index([type])
+  @@index([createdAt])
+}
+
+model Notification {
+  id        String           @id @default(auto()) @map("_id") @db.ObjectId
+  type      NotificationType
+  title     String
+  message   String
+  read      Boolean          @default(false)
+  userId    String?          @db.ObjectId
+  user      User?            @relation(fields: [userId], references: [id])
+  createdAt DateTime         @default(now())
+
+  @@index([userId, read])
+  @@index([createdAt])
+}
+
+model ActivityLog {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String?  @db.ObjectId
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String
+  detail    String?
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model LoginHistory {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String   @db.ObjectId
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ip        String?
+  userAgent String?
+  device    String?
+  success   Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model ApiLog {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  panelId    String?  @db.ObjectId
+  panel      Panel?   @relation(fields: [panelId], references: [id], onDelete: SetNull)
+  action     String
+  statusCode Int?
+  durationMs Int?
+  ok         Boolean  @default(true)
+  request    Json?
+  response   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([panelId])
+  @@index([createdAt])
+}

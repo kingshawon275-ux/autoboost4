@@ -196,13 +196,13 @@ async function submitOrdersByIds(ids: string[]) {
   });
 
   let anyOk = false;
-  // High concurrency so even 100+ orders hit the provider almost at once.
-  // addOrder() retries transient errors internally, so this stays reliable.
-  await mapLimit(orders, 25, async (order) => {
-    if (order.providerOrderId || order.status !== "PENDING") return;
+
+  // Submit ONE order to its provider. Returns true on success.
+  const submitOne = async (order: (typeof orders)[number]): Promise<boolean> => {
+    if (order.providerOrderId || order.status !== "PENDING") return false;
     if (!order.panel || !order.serviceId) {
       await markFailed(order.id, "Missing panel/service");
-      return;
+      return false;
     }
     const client = new SmmClient(order.panel.apiUrl, order.panel.apiKey);
     const res = await client.addOrder({
@@ -231,23 +231,35 @@ async function submitOrdersByIds(ids: string[]) {
           }),
         ]),
       ).catch(() => {});
-      anyOk = true;
+      return true;
     } else if (isPermanentError(res.error)) {
-      // Provider rejected (balance / active order / invalid link…) → fail now.
+      // Hard rejection (balance / invalid link…) → fail now.
       await markFailed(order.id, res.error ?? "Provider rejected order");
+      return false;
     } else {
-      // Only network/timeout (no provider message) → leave PENDING for retry.
+      // Temporary (active-order / network) → retry via background queue.
+      const wait = isActiveOrderError(res.error) ? 60_000 : 5_000;
       await prisma.order
         .update({
           where: { id: order.id },
           data: {
-            submitAttempts: { increment: 1 },
-            nextRetryAt: new Date(Date.now() + 5_000),
-            errorMessage: res.error ? `Retrying… (${res.error})` : "Retrying…",
+            nextRetryAt: new Date(Date.now() + wait),
+            errorMessage: "Waiting for the previous order on this link…",
           },
         })
         .catch(() => {});
+      return false;
     }
+  };
+
+  // Submit everything in PARALLEL for maximum speed — most panels accept many
+  // services on the same link at once (no collision). If a panel ever returns
+  // "You have active order with this link", that order is simply retried by the
+  // background queue (isActiveOrderError) instead of failing — so it's never
+  // lost and every other order still goes out at full speed.
+  await mapLimit(orders, 25, async (order) => {
+    const ok = await submitOne(order);
+    if (ok) anyOk = true;
   });
 
   if (anyOk) emitUpdate("orders", "dashboard", "panels");
@@ -326,13 +338,26 @@ export async function submitPendingOrders(limit = 200) {
         return;
       }
 
-      // A permanent provider rejection (balance / active order / invalid link…)
-      // fails immediately. Only a genuine network/timeout error (no provider
-      // message) is retried, so orders aren't lost to temporary blips.
+      // A permanent provider rejection (balance / invalid link…) fails now.
+      // "active order with this link" is TEMPORARY → keep retrying (don't count
+      // it against MAX_ATTEMPTS) until the earlier order on this link finishes.
+      // Only a genuine network/timeout error is retried with backoff.
       const attempts = order.submitAttempts + 1;
       if (isPermanentError(res.error)) {
         await markFailed(order.id, res.error ?? "Provider rejected order");
         failed++;
+      } else if (isActiveOrderError(res.error)) {
+        await prisma.order
+          .update({
+            where: { id: order.id },
+            data: {
+              // don't increment attempts — this isn't a failure, just a wait.
+              nextRetryAt: new Date(Date.now() + 60_000),
+              errorMessage: "Waiting for the previous order on this link…",
+            },
+          })
+          .catch(() => {});
+        retry++;
       } else if (attempts < MAX_ATTEMPTS) {
         const backoffMs = Math.min(120_000, 3_000 * 2 ** order.submitAttempts);
         await prisma.order
@@ -359,24 +384,38 @@ export async function submitPendingOrders(limit = 200) {
   }
 }
 
+// "You have active order with this link" — the panel won't accept a 2nd order
+// for the same link while one is in progress. This is TEMPORARY: once the first
+// order finishes, the next is accepted. So we RETRY these (with a longer wait),
+// not fail them.
+function isActiveOrderError(error?: string | null): boolean {
+  if (!error) return false;
+  const e = error.toLowerCase();
+  return (
+    e.includes("active order") ||
+    e.includes("already") ||
+    e.includes("duplicate") ||
+    e.includes("existing order") ||
+    e.includes("in progress for this") ||
+    e.includes("pending order")
+  );
+}
+
 // Detect a PERMANENT provider rejection (retrying won't help) → fail
-// immediately instead of looping "Retrying…". Covers balance, "active order
-// already exists", invalid link/service, limits, etc. Only genuine network /
-// timeout errors (no provider message) get retried.
+// immediately. Covers balance, invalid link/service, limits. NOTE: "active
+// order" is NOT here — that's temporary (see isActiveOrderError).
 function isPermanentError(error?: string | null): boolean {
   if (!error) return false;
   const e = error.toLowerCase();
   const permanent = [
     // balance / funds
     "balance", "fund", "insufficient", "not enough", "top up", "top-up", "topup",
-    // duplicate / active order
-    "active order", "already", "duplicate", "existing order", "in progress for this",
     // link / service problems
-    "invalid", "incorrect", "not found", "wrong", "link", "url", "service",
+    "invalid", "incorrect", "not found", "wrong link", "wrong url", "no service",
     // limits / format
-    "min", "max", "limit", "quantity", "format",
-    // generic rejections
-    "not allowed", "disabled", "unavailable", "closed", "blocked", "cancel",
+    "min ", "max ", "minimum", "maximum",
+    // generic hard rejections
+    "not allowed", "disabled", "unavailable", "closed", "blocked",
   ];
   return permanent.some((w) => e.includes(w));
 }

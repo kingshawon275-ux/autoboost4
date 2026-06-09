@@ -16,6 +16,7 @@
     "seed": "tsx prisma/seed.ts",
     "reset": "tsx prisma/reset.ts",
     "clean-errors": "tsx prisma/clean-errors.ts",
+    "requeue-active": "tsx prisma/requeue-active.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

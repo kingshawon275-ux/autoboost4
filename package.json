@@ -9,12 +9,13 @@
     "dev": "next dev",
     "build": "prisma generate && next build",
     "start": "next start",
-    "start:server": "node server.js",
+    "start:server": "cross-env NODE_ENV=production node server.js",
     "postinstall": "prisma generate",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
     "seed": "tsx prisma/seed.ts",
     "reset": "tsx prisma/reset.ts",
+    "clean-errors": "tsx prisma/clean-errors.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

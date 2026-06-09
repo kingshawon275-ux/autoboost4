@@ -3,7 +3,7 @@
  * errors. These happen when concurrent writers (e.g. the background scheduler
  * and a manual sync) touch the same document at once.
  */
-export async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+export async function withRetry<T>(fn: () => Promise<T>, attempts = 8): Promise<T> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
@@ -17,8 +17,11 @@ export async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<
         msg.includes("deadlock") ||
         msg.includes("Please retry");
       if (!retryable || i === attempts - 1) throw err;
-      // small backoff with jitter
-      await new Promise((r) => setTimeout(r, 80 * (i + 1) + Math.random() * 60));
+      // Exponential backoff with generous jitter so many concurrent writers on
+      // the same document (e.g. 4 orders decrementing one panel's balance) don't
+      // keep colliding — they spread out and each succeeds.
+      const base = Math.min(1500, 100 * 2 ** i);
+      await new Promise((r) => setTimeout(r, base + Math.random() * base));
     }
   }
   throw lastErr;

@@ -212,25 +212,7 @@ async function submitOrdersByIds(ids: string[]) {
     });
 
     if (res.ok && res.data?.order) {
-      const providerOrder = String(res.data.order);
-      await withRetry(() =>
-        prisma.$transaction([
-          prisma.order.update({
-            where: { id: order.id },
-            data: { status: "PROCESSING", providerOrderId: providerOrder, nextRetryAt: null, errorMessage: null },
-          }),
-          prisma.orderLog.create({
-            data: { orderId: order.id, status: "PROCESSING", message: `Submitted (provider #${providerOrder})` },
-          }),
-          prisma.transaction.create({
-            data: { type: "ORDER", amount: order.cost, currency: order.panel!.currency, userId: order.userId, orderId: order.id, panelId: order.panelId, note: `${order.boostType} x${order.quantity}` },
-          }),
-          prisma.panel.update({
-            where: { id: order.panelId },
-            data: { balance: { decrement: order.cost } },
-          }),
-        ]),
-      ).catch(() => {});
+      await commitSuccess(order, String(res.data.order));
       return true;
     } else if (isPermanentError(res.error)) {
       // Hard rejection (balance / invalid link…) → fail now.
@@ -315,25 +297,7 @@ export async function submitPendingOrders(limit = 200) {
       });
 
       if (res.ok && res.data?.order) {
-        const providerOrder = String(res.data.order);
-        await withRetry(() =>
-          prisma.$transaction([
-            prisma.order.update({
-              where: { id: order.id },
-              data: { status: "PROCESSING", providerOrderId: providerOrder, nextRetryAt: null, errorMessage: null },
-            }),
-            prisma.orderLog.create({
-              data: { orderId: order.id, status: "PROCESSING", message: `Submitted (provider #${providerOrder})` },
-            }),
-            prisma.transaction.create({
-              data: { type: "ORDER", amount: order.cost, currency: order.panel!.currency, userId: order.userId, orderId: order.id, panelId: order.panelId, note: `${order.boostType} x${order.quantity}` },
-            }),
-            prisma.panel.update({
-              where: { id: order.panelId },
-              data: { balance: { decrement: order.cost } },
-            }),
-          ]),
-        ).catch(() => {});
+        await commitSuccess(order, String(res.data.order));
         ok++;
         return;
       }
@@ -429,6 +393,63 @@ async function markFailed(orderId: string, message: string) {
       }),
       prisma.orderLog.create({ data: { orderId, status: "FAILED", message } }),
     ]),
+  ).catch(() => {});
+}
+
+type SubmittableOrder = {
+  id: string;
+  cost: number;
+  boostType: BoostType;
+  quantity: number;
+  userId: string;
+  panelId: string;
+  panel: { currency: string } | null;
+};
+
+/**
+ * Record a successful provider submission. CRITICAL: once the provider accepts
+ * an order, it MUST NOT end up Failed because of a DB hiccup. So we do the one
+ * write that matters (mark PROCESSING + save providerOrderId) FIRST, on its own,
+ * with heavy retry. The bookkeeping (log, transaction, balance decrement) is
+ * done separately and best-effort — if it loses a write-conflict race against
+ * the 3 other orders hitting the same panel, the order still stays PROCESSING
+ * and the balance is corrected by the next balance sync.
+ */
+async function commitSuccess(order: SubmittableOrder, providerOrder: string) {
+  // 1) The essential write — never let this fail.
+  await withRetry(() =>
+    prisma.order.update({
+      where: { id: order.id },
+      data: { status: "PROCESSING", providerOrderId: providerOrder, nextRetryAt: null, errorMessage: null },
+    }),
+  );
+
+  // 2) Bookkeeping — best-effort, each isolated so one conflict can't undo another.
+  await withRetry(() =>
+    prisma.orderLog.create({
+      data: { orderId: order.id, status: "PROCESSING", message: `Submitted (provider #${providerOrder})` },
+    }),
+  ).catch(() => {});
+
+  await withRetry(() =>
+    prisma.transaction.create({
+      data: {
+        type: "ORDER",
+        amount: order.cost,
+        currency: order.panel?.currency ?? "USD",
+        userId: order.userId,
+        orderId: order.id,
+        panelId: order.panelId,
+        note: `${order.boostType} x${order.quantity}`,
+      },
+    }),
+  ).catch(() => {});
+
+  await withRetry(() =>
+    prisma.panel.update({
+      where: { id: order.panelId },
+      data: { balance: { decrement: order.cost } },
+    }),
   ).catch(() => {});
 }
 

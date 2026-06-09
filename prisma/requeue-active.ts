@@ -16,7 +16,13 @@ async function main() {
     select: { id: true, errorMessage: true },
   });
 
-  const terms = ["active order", "already", "duplicate", "existing order", "in progress for this", "pending order"];
+  // Temporary causes that should never have failed: the active-order race AND
+  // DB write-conflict / deadlock errors (which fired before the success commit
+  // was made resilient). Re-queueing lets them submit cleanly.
+  const terms = [
+    "active order", "already", "duplicate", "existing order", "in progress for this", "pending order",
+    "write conflict", "writeconflict", "deadlock", "please retry", "transaction",
+  ];
   const toRequeue = failed.filter((o) => {
     const e = (o.errorMessage ?? "").toLowerCase();
     return terms.some((t) => e.includes(t));

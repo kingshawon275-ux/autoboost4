@@ -74,16 +74,18 @@ export function OrdersClient() {
     }
   }
 
-  const clearFailed = useMutation({
-    mutationFn: () => apiFetch<{ deleted: number }>("/api/orders/clear-failed", { method: "POST" }),
+  const clearByStatus = useMutation({
+    mutationFn: (status: string) =>
+      apiFetch<{ deleted: number }>(`/api/orders/clear?status=${status}`, { method: "POST" }),
     onSuccess: (res) => {
-      toast.success(`Cleared ${res.deleted} failed order(s)`);
+      toast.success(`Cleared ${res.deleted} order(s)`);
       qc.invalidateQueries({ queryKey: ["orders"] });
     },
     onError: (e: Error) => toast.error(e.message),
   });
 
   const hasFailed = (orders ?? []).some((o) => o.status === "FAILED");
+  const hasPartial = (orders ?? []).some((o) => o.status === "PARTIAL");
 
   return (
     <div>
@@ -95,17 +97,34 @@ export function OrdersClient() {
           <Button
             variant="outline"
             onClick={() => {
-              if (confirm("Delete all failed orders?")) clearFailed.mutate();
+              if (confirm("Delete all failed orders?")) clearByStatus.mutate("FAILED");
             }}
-            disabled={clearFailed.isPending}
+            disabled={clearByStatus.isPending}
             className="text-destructive"
           >
-            {clearFailed.isPending ? (
+            {clearByStatus.isPending ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
               <Trash2 className="h-4 w-4" />
             )}
             Clear failed
+          </Button>
+        )}
+        {hasPartial && (
+          <Button
+            variant="outline"
+            onClick={() => {
+              if (confirm("Delete all partial orders?")) clearByStatus.mutate("PARTIAL");
+            }}
+            disabled={clearByStatus.isPending}
+            className="text-amber-600 dark:text-amber-500"
+          >
+            {clearByStatus.isPending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Trash2 className="h-4 w-4" />
+            )}
+            Clear partial
           </Button>
         )}
         <Button variant="secondary" onClick={() => refresh.mutate()} disabled={refresh.isPending}>

@@ -28,7 +28,8 @@ async function run(req: Request) {
     }
 
     // Refresh statuses (this also submits/retries pending orders first).
-    const status = await refreshOrderStatuses(150);
+    // Default limit (500) clears large Processing backlogs each run.
+    const status = await refreshOrderStatuses();
 
     // Sync balances periodically — only every ~10th minute to stay light.
     let balances: { panels: number; ok: number } | null = null;

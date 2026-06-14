@@ -478,10 +478,11 @@ export async function failStuckOrders(olderThanMs = 10 * 60 * 1000) {
 }
 
 /** Poll the provider for status of in-flight orders and update our records. */
-export async function refreshOrderStatuses(limit = 50) {
+export async function refreshOrderStatuses(limit = 500) {
   // First, push any PENDING orders to the provider (and retry due ones). This
-  // is what makes submission reliable even when the create request returned
-  // before everything was sent.
+  // is isolated so a slow/failing submission can NEVER block status syncing —
+  // that bug left many orders stuck "Processing" on the site while the panel
+  // had long finished them.
   await submitPendingOrders().catch(() => {});
 
   const orders = await prisma.order.findMany({
@@ -497,22 +498,21 @@ export async function refreshOrderStatuses(limit = 50) {
   const { mapProviderStatus } = await import("@/lib/smm/client");
   let updated = 0;
 
-  // Check all provider statuses in parallel, then persist changes.
-  const results = await Promise.all(
-    orders.map(async (order) => {
-      if (!order.panel || !order.providerOrderId) return null;
-      const client = new SmmClient(order.panel.apiUrl, order.panel.apiKey);
-      const res = await client.status(order.providerOrderId);
-      if (!res.ok || !res.data) return null;
+  // Check provider statuses with bounded concurrency (fast even for hundreds of
+  // orders without hammering any one panel), then persist changes.
+  const results = await mapLimit(orders, 20, async (order) => {
+    if (!order.panel || !order.providerOrderId) return null;
+    const client = new SmmClient(order.panel.apiUrl, order.panel.apiKey);
+    const res = await client.status(order.providerOrderId);
+    if (!res.ok || !res.data) return null;
 
-      const status = mapProviderStatus(res.data.status);
-      const remains = res.data.remains != null ? parseInt(res.data.remains) : order.remains;
-      const startCount = res.data.start_count != null ? parseInt(res.data.start_count) : order.startCount;
-      if (status === order.status && remains === order.remains) return null;
+    const status = mapProviderStatus(res.data.status);
+    const remains = res.data.remains != null ? parseInt(res.data.remains) : order.remains;
+    const startCount = res.data.start_count != null ? parseInt(res.data.start_count) : order.startCount;
+    if (status === order.status && remains === order.remains) return null;
 
-      return { order, status, remains, startCount, providerStatus: res.data.status };
-    }),
-  );
+    return { order, status, remains, startCount, providerStatus: res.data.status };
+  });
 
   await Promise.all(
     results.map((r) => {

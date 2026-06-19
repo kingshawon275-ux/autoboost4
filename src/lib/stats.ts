@@ -1,3 +1,4 @@
+import { unstable_cache } from "next/cache";
 import { prisma } from "@/lib/prisma";
 
 export interface DashboardStats {
@@ -38,7 +39,10 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       _sum: { quantity: true },
     }),
     prisma.order.aggregate({ _sum: { cost: true } }),
-    prisma.order.findMany({ distinct: ["postUrl"], select: { postUrl: true } }),
+    // Distinct post URLs. Use a server-side groupBy (count of groups) instead of
+    // pulling every order's postUrl into memory — the old findMany scanned the
+    // whole orders collection and was the main dashboard slowdown.
+    prisma.order.groupBy({ by: ["postUrl"], _count: true }),
     prisma.panel.findMany({ select: { balance: true, status: true } }),
   ]);
 
@@ -105,3 +109,19 @@ export async function getServiceUsage() {
     }))
     .sort((a, b) => b.quantity - a.quantity);
 }
+
+// Cached variants — used by the dashboard so navigating to it is instant.
+// The stats are global (admin overview), so a short shared cache is safe; live
+// changes still surface via the realtime socket + client polling, and the cache
+// auto-refreshes every 15s.
+export const getCachedDashboardStats = unstable_cache(getDashboardStats, ["dashboard-stats"], {
+  revalidate: 15,
+});
+export const getCachedDailySeries = unstable_cache(
+  () => getDailySeries(14),
+  ["dashboard-daily"],
+  { revalidate: 15 },
+);
+export const getCachedServiceUsage = unstable_cache(getServiceUsage, ["dashboard-usage"], {
+  revalidate: 15,
+});

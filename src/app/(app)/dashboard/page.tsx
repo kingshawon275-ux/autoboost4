@@ -3,10 +3,17 @@ import { StatCard } from "@/components/dashboard/stat-card";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { OrdersAreaChart, ServiceUsageChart } from "@/components/dashboard/charts";
-import { getDashboardStats, getDailySeries, getServiceUsage } from "@/lib/stats";
+import {
+  getCachedDashboardStats,
+  getCachedDailySeries,
+  getCachedServiceUsage,
+} from "@/lib/stats";
 import { guardPage } from "@/lib/guard";
 import { LowBalanceAlert } from "@/components/dashboard/low-balance-alert";
 
+// Page stays dynamic (per-user auth check), but the heavy stats queries are
+// cached for a few seconds (see getCachedDashboard) so navigating here is
+// instant instead of running ~10 DB aggregates on every click.
 export const dynamic = "force-dynamic";
 
 const EMPTY_STATS = {
@@ -33,9 +40,9 @@ export default async function DashboardPage() {
 
   try {
     [stats, daily, usage] = await Promise.all([
-      getDashboardStats(),
-      getDailySeries(14),
-      getServiceUsage(),
+      getCachedDashboardStats(),
+      getCachedDailySeries(),
+      getCachedServiceUsage(),
     ]);
   } catch {
     dbError = true;

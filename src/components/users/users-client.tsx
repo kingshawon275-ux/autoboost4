@@ -393,7 +393,10 @@ export function UsersClient() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Spending — {spendUser?.name || spendUser?.email}</DialogTitle>
-            <DialogDescription>Date-wise spending (Bangladesh time).</DialogDescription>
+            <DialogDescription>
+              Full date-wise spending history (Bangladesh time)
+              {spendDetail ? ` — ${spendDetail.days.length} day(s)` : ""}.
+            </DialogDescription>
           </DialogHeader>
 
           {spendDetail ? (
@@ -412,8 +415,8 @@ export function UsersClient() {
                 </div>
               </div>
 
-              {/* Date-wise */}
-              <div className="max-h-72 space-y-1.5 overflow-y-auto scrollbar-thin">
+              {/* Date-wise — full history, scrollable */}
+              <div className="max-h-[26rem] space-y-1.5 overflow-y-auto scrollbar-thin pr-1">
                 {spendDetail.days.length ? (
                   spendDetail.days.map((d) => (
                     <div

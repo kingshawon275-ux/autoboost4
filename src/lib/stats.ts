@@ -110,6 +110,54 @@ export async function getServiceUsage() {
     .sort((a, b) => b.quantity - a.quantity);
 }
 
+/** Total spending grouped by panel (across all time). Cost is in USD. */
+export async function getPanelSpending() {
+  const [grouped, panels] = await Promise.all([
+    prisma.order.groupBy({
+      by: ["panelId"],
+      where: { status: { not: "FAILED" } },
+      _sum: { cost: true },
+      _count: true,
+    }),
+    prisma.panel.findMany({ select: { id: true, name: true, currency: true } }),
+  ]);
+  const nameOf = new Map(panels.map((p) => [p.id, p.name]));
+  return grouped
+    .map((g) => ({
+      panelId: g.panelId,
+      name: nameOf.get(g.panelId) ?? "Unknown panel",
+      spend: +(g._sum.cost ?? 0).toFixed(4),
+      orders: g._count,
+    }))
+    .sort((a, b) => b.spend - a.spend);
+}
+
+/** Spending grouped by Bangladesh-local day for the last N days. Cost in USD. */
+export async function getDailySpending(days = 30) {
+  const since = new Date();
+  since.setDate(since.getDate() - (days - 1));
+  since.setHours(0, 0, 0, 0);
+
+  const orders = await prisma.order.findMany({
+    where: { createdAt: { gte: since }, status: { not: "FAILED" } },
+    select: { createdAt: true, cost: true },
+  });
+
+  const byDay = new Map<string, { date: string; orders: number; spend: number }>();
+  for (const o of orders) {
+    // Bangladesh-local date (Asia/Dhaka = UTC+6).
+    const bd = new Date(o.createdAt.getTime() + 6 * 60 * 60 * 1000);
+    const key = bd.toISOString().slice(0, 10);
+    const e = byDay.get(key) ?? { date: key, orders: 0, spend: 0 };
+    e.orders += 1;
+    e.spend += o.cost;
+    byDay.set(key, e);
+  }
+  return Array.from(byDay.values())
+    .map((d) => ({ ...d, spend: +d.spend.toFixed(4) }))
+    .sort((a, b) => b.date.localeCompare(a.date));
+}
+
 // Cached variants — used by the dashboard so navigating to it is instant.
 // The stats are global (admin overview), so a short shared cache is safe; live
 // changes still surface via the realtime socket + client polling, and the cache

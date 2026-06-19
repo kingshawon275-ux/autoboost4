@@ -3,9 +3,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { OrdersAreaChart, ServiceUsageChart } from "@/components/dashboard/charts";
 import { Progress } from "@/components/ui/progress";
-import { getDailySeries, getServiceUsage } from "@/lib/stats";
+import { getDailySeries, getServiceUsage, getPanelSpending, getDailySpending } from "@/lib/stats";
 import { prisma } from "@/lib/prisma";
-import { formatCurrency } from "@/lib/utils";
+import { PanelBalance } from "@/components/analytics/panel-balance";
+import { SpendingBreakdown } from "@/components/analytics/spending-breakdown";
 import { guardPage } from "@/lib/guard";
 
 export const dynamic = "force-dynamic";
@@ -16,16 +17,20 @@ export default async function AnalyticsPage() {
   let daily: { date: string; orders: number; spending: number }[] = [];
   let usage: { type: string; quantity: number; count: number }[] = [];
   let panels: { id: string; name: string; successRate: number; responseMs: number; balance: number; currency: string }[] = [];
+  let panelSpend: { panelId: string; name: string; spend: number; orders: number }[] = [];
+  let dailySpend: { date: string; orders: number; spend: number }[] = [];
   let error = false;
 
   try {
-    [daily, usage, panels] = await Promise.all([
+    [daily, usage, panels, panelSpend, dailySpend] = await Promise.all([
       getDailySeries(30),
       getServiceUsage(),
       prisma.panel.findMany({
         select: { id: true, name: true, successRate: true, responseMs: true, balance: true, currency: true },
         orderBy: { priority: "desc" },
       }),
+      getPanelSpending(),
+      getDailySpending(30),
     ]);
   } catch {
     error = true;
@@ -58,6 +63,9 @@ export default async function AnalyticsPage() {
             </CardContent>
           </Card>
 
+          {/* Panel-wise & date-wise spending (shown in your chosen currency) */}
+          <SpendingBreakdown panelSpend={panelSpend} dailySpend={dailySpend} />
+
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
             <Card>
               <CardHeader>
@@ -86,7 +94,7 @@ export default async function AnalyticsPage() {
                         <span className="font-medium">{p.name}</span>
                         <span className="flex items-center gap-2 text-xs text-muted-foreground">
                           <Badge variant="secondary">{p.responseMs || 0}ms</Badge>
-                          {formatCurrency(p.balance, p.currency)}
+                          <PanelBalance usd={p.balance} />
                         </span>
                       </div>
                       <div className="flex items-center gap-2">

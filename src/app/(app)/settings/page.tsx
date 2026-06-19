@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { MappingsManager } from "@/components/settings/mappings-manager";
 import { CurrencySettings } from "@/components/settings/currency-settings";
+import { CommentLibrariesManager } from "@/components/settings/comment-libraries-manager";
 
 export default async function SettingsPage() {
   const session = await auth();
@@ -31,6 +32,8 @@ export default async function SettingsPage() {
         </Card>
 
         {user?.role === "ADMIN" && <CurrencySettings />}
+
+        {(user?.role === "ADMIN" || user?.role === "MODERATOR") && <CommentLibrariesManager />}
 
         <MappingsManager />
       </div>

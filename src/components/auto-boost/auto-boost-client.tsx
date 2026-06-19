@@ -77,6 +77,7 @@ interface BoostCfg {
   min: string;
   max: string;
   comments?: string; // custom comments (one per line) — COMMENT boost only
+  commentLibraryId?: string; // pull random comments from this admin library
 }
 const DEFAULT_CFG: BoostCfg = { mode: "fixed", fixed: "1000", min: "30", max: "35" };
 
@@ -87,6 +88,7 @@ interface SavedBoost {
   minQuantity?: number;
   maxQuantity?: number;
   comments?: string;
+  commentLibraryId?: string;
 }
 interface Preset {
   id: string;
@@ -149,6 +151,14 @@ export function AutoBoostClient() {
     queryFn: () => apiFetch<Preset[]>("/api/presets"),
   });
 
+  const { data: commentLibraries } = useQuery({
+    queryKey: ["comment-libraries"],
+    queryFn: () =>
+      apiFetch<{ id: string; name: string; enabled: boolean; count: number }[]>(
+        "/api/comment-libraries",
+      ),
+  });
+
   const { data: settings } = useQuery({
     queryKey: ["settings"],
     queryFn: () => apiFetch<{ quickQuantities: number[] }>("/api/settings"),
@@ -171,6 +181,7 @@ export function AutoBoostClient() {
         min: String(b.minQuantity ?? 30),
         max: String(b.maxQuantity ?? 35),
         comments: b.comments ?? undefined,
+        commentLibraryId: b.commentLibraryId ?? undefined,
       };
     }
     setBoostConfigs(cfgs);
@@ -232,6 +243,8 @@ export function AutoBoostClient() {
             minQuantity: c.mode === "random" ? Number(c.min) : undefined,
             maxQuantity: c.mode === "random" ? Number(c.max) : undefined,
             comments: boostType === "COMMENT" && c.comments?.trim() ? c.comments : undefined,
+            commentLibraryId:
+              boostType === "COMMENT" && c.commentLibraryId ? c.commentLibraryId : undefined,
           })),
           manualMode,
           manualQty: manualMode ? manualQty : undefined,
@@ -361,6 +374,8 @@ export function AutoBoostClient() {
         minQuantity: c.mode === "random" ? Number(c.min) : undefined,
         maxQuantity: c.mode === "random" ? Number(c.max) : undefined,
         comments: boostType === "COMMENT" && c.comments?.trim() ? c.comments : undefined,
+        commentLibraryId:
+          boostType === "COMMENT" && c.commentLibraryId ? c.commentLibraryId : undefined,
       })),
       dryRun,
     };
@@ -627,26 +642,110 @@ export function AutoBoostClient() {
 
                         <div className="px-3 pb-3">
                           {b.value === "COMMENT" ? (
-                            <div className="space-y-2">
-                              <Label className="text-xs">Custom comments — one per line</Label>
-                              <textarea
-                                value={cfg.comments ?? ""}
-                                onChange={(e) => updateBoost(b.value, { comments: e.target.value })}
-                                rows={5}
-                                placeholder={"Nice post! 🔥\nLove this\nAmazing content"}
-                                className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none ring-primary/40 focus:ring-2"
-                              />
-                              <p className="text-xs text-muted-foreground">
-                                {(() => {
-                                  const n = (cfg.comments ?? "")
-                                    .split("\n")
-                                    .map((l) => l.trim())
-                                    .filter(Boolean).length;
-                                  return n > 0
-                                    ? `${n} comment${n > 1 ? "s" : ""} — quantity will be ${n}.`
-                                    : "Leave empty to use a normal quantity (random comments from the panel).";
-                                })()}
-                              </p>
+                            <div className="space-y-3">
+                              {/* Language libraries — pick one to send random comments */}
+                              <div className="space-y-1.5">
+                                <Label className="text-xs">Comment language (random from library)</Label>
+                                <div className="flex flex-wrap gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      updateBoost(b.value, { commentLibraryId: undefined })
+                                    }
+                                    className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                                      !cfg.commentLibraryId
+                                        ? "border-primary bg-primary/15 text-primary"
+                                        : "border-border text-muted-foreground hover:border-primary/50"
+                                    }`}
+                                  >
+                                    None
+                                  </button>
+                                  {(commentLibraries ?? [])
+                                    .filter((lib) => lib.enabled && lib.count > 0)
+                                    .map((lib) => (
+                                      <button
+                                        key={lib.id}
+                                        type="button"
+                                        onClick={() =>
+                                          updateBoost(b.value, {
+                                            commentLibraryId: lib.id,
+                                            mode: "fixed",
+                                          })
+                                        }
+                                        className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                                          cfg.commentLibraryId === lib.id
+                                            ? "border-primary bg-primary/15 text-primary"
+                                            : "border-border text-muted-foreground hover:border-primary/50"
+                                        }`}
+                                      >
+                                        {lib.name}{" "}
+                                        <span className="opacity-60">({lib.count.toLocaleString()})</span>
+                                      </button>
+                                    ))}
+                                  {!commentLibraries?.length && (
+                                    <span className="text-xs text-muted-foreground">
+                                      No libraries yet — admin can add them in Settings.
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+
+                              {cfg.commentLibraryId ? (
+                                // Library selected → just need a quantity.
+                                <div className="space-y-2">
+                                  <Label className="text-xs">How many comments?</Label>
+                                  <Input
+                                    type="number"
+                                    min={1}
+                                    value={cfg.fixed}
+                                    placeholder="Quantity"
+                                    onChange={(e) => updateBoost(b.value, { fixed: e.target.value })}
+                                  />
+                                  <div className="flex flex-wrap gap-2">
+                                    {quickQuantities.map((q) => (
+                                      <Button
+                                        key={q}
+                                        type="button"
+                                        variant="secondary"
+                                        size="sm"
+                                        onClick={() => updateBoost(b.value, { fixed: String(q) })}
+                                      >
+                                        {q.toLocaleString()}
+                                      </Button>
+                                    ))}
+                                  </div>
+                                  <p className="text-xs text-muted-foreground">
+                                    {Number(cfg.fixed) > 0
+                                      ? `${Number(cfg.fixed).toLocaleString()} random comments will be picked from this language.`
+                                      : "Enter how many comments to send."}
+                                  </p>
+                                </div>
+                              ) : (
+                                // No library → type your own custom comments (optional).
+                                <div className="space-y-2">
+                                  <Label className="text-xs">Or type custom comments — one per line</Label>
+                                  <textarea
+                                    value={cfg.comments ?? ""}
+                                    onChange={(e) =>
+                                      updateBoost(b.value, { comments: e.target.value })
+                                    }
+                                    rows={5}
+                                    placeholder={"Nice post! 🔥\nLove this\nAmazing content"}
+                                    className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none ring-primary/40 focus:ring-2"
+                                  />
+                                  <p className="text-xs text-muted-foreground">
+                                    {(() => {
+                                      const n = (cfg.comments ?? "")
+                                        .split("\n")
+                                        .map((l) => l.trim())
+                                        .filter(Boolean).length;
+                                      return n > 0
+                                        ? `${n} comment${n > 1 ? "s" : ""} — quantity will be ${n}.`
+                                        : "Leave empty to use a normal quantity (random comments from the panel).";
+                                    })()}
+                                  </p>
+                                </div>
+                              )}
                             </div>
                           ) : cfg.mode === "fixed" ? (
                             <div className="space-y-2">

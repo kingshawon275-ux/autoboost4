@@ -35,6 +35,31 @@ export interface BoostPlan {
 }
 
 /**
+ * Pick `count` comments from a pool at random. If the pool is smaller than the
+ * requested count, it wraps around (reusing comments) so the full quantity is
+ * always produced. The pool is shuffled each pass so the order varies.
+ */
+function pickRandomComments(pool: string[], count: number): string[] {
+  const out: string[] = [];
+  const shuffle = () => {
+    const a = [...pool];
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  };
+  while (out.length < count) {
+    const batch = shuffle();
+    for (const c of batch) {
+      out.push(c);
+      if (out.length >= count) break;
+    }
+  }
+  return out;
+}
+
+/**
  * Build candidate panels for a given boost type, using ServiceMappings to
  * resolve which provider service each panel should use. Falls back to a
  * best-guess category match when no explicit mapping exists.
@@ -76,22 +101,42 @@ export async function planAutoBoost(input: AutoBoostInput): Promise<BoostPlan> {
   for (const boost of input.boosts) {
     const boostType = boost.boostType;
 
-    // For COMMENT boosts with custom comments, the quantity is the number of
-    // non-empty comment lines, and the same comment list goes to each panel.
-    const commentLines =
+    // ----- Resolve the comments to send (if any) and the quantity. -----
+    // Priority for COMMENT boosts:
+    //   1) typed custom comments        → quantity = number of lines
+    //   2) a selected comment library   → pick `quantity` random lines
+    //   3) nothing                      → normal quantity (panel's own comments)
+    const typedLines =
       boostType === "COMMENT" && boost.comments
         ? boost.comments.split("\n").map((l) => l.trim()).filter(Boolean)
         : [];
-    const customComments = commentLines.length ? commentLines.join("\n") : undefined;
 
-    const baseQuantity = customComments
-      ? commentLines.length
-      : resolveQuantity({
-          mode: boost.quantityMode,
-          fixed: boost.fixedQuantity,
-          min: boost.minQuantity,
-          max: boost.maxQuantity,
+    let customComments: string | undefined;
+    let baseQuantity: number;
+
+    if (typedLines.length) {
+      customComments = typedLines.join("\n");
+      baseQuantity = typedLines.length;
+    } else {
+      baseQuantity = resolveQuantity({
+        mode: boost.quantityMode,
+        fixed: boost.fixedQuantity,
+        min: boost.minQuantity,
+        max: boost.maxQuantity,
+      });
+
+      if (boostType === "COMMENT" && boost.commentLibraryId) {
+        const lib = await prisma.commentLibrary.findUnique({
+          where: { id: boost.commentLibraryId },
         });
+        const pool = lib?.comments?.filter((c) => c.trim()) ?? [];
+        if (pool.length) {
+          customComments = pickRandomComments(pool, baseQuantity).join("\n");
+        } else {
+          planWarnings.push(`Comment library "${lib?.name ?? boost.commentLibraryId}" is empty.`);
+        }
+      }
+    }
 
     const candidates = await candidatesFor(boostType, input.platform, input.panelIds);
     if (!candidates.length) {

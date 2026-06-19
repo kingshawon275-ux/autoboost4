@@ -38,6 +38,9 @@ export const boostConfigSchema = z
     // Custom comments (one per line) — only used for COMMENT boosts. When set,
     // the order quantity is the number of comment lines.
     comments: z.string().optional(),
+    // Or pull random comments from an admin comment library (by id). The order
+    // quantity (fixed/random) decides how many are randomly picked.
+    commentLibraryId: z.string().optional(),
   })
   .refine(
     (b) =>
@@ -92,6 +95,19 @@ export const presetSchema = z.object({
 });
 
 export type PresetInput = z.infer<typeof presetSchema>;
+
+// Admin comment library (one language of comments).
+export const commentLibrarySchema = z.object({
+  name: z.string().min(1, "Name is required").max(40),
+  // Accept the raw textarea text OR an array; normalize to clean lines.
+  comments: z
+    .union([z.string(), z.array(z.string())])
+    .transform((v) => (Array.isArray(v) ? v : v.split("\n")))
+    .transform((arr) => arr.map((l) => l.trim()).filter(Boolean)),
+  enabled: z.boolean().optional().default(true),
+});
+
+export type CommentLibraryInput = z.infer<typeof commentLibrarySchema>;
 
 export const serviceMappingSchema = z.object({
   boostType: BOOST,

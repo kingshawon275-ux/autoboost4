@@ -152,6 +152,18 @@ model BoostPreset {
   @@index([userId])
 }
 
+// A named library of comments in one language (e.g. "Bangla", "English").
+// Admins fill these with thousands of comments; Auto Boost can pull a random
+// quantity from a selected library for COMMENT boosts.
+model CommentLibrary {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  name      String   // language / label shown in the UI, e.g. "Bangla"
+  comments  String[] // the comment lines
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 // Global app settings (single document). Controls currency display etc.
 model AppSettings {
   id           String   @id @default(auto()) @map("_id") @db.ObjectId

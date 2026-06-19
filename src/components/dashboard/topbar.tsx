@@ -3,7 +3,15 @@
 import * as React from "react";
 import { signOut, useSession } from "next-auth/react";
 import { useQuery } from "@tanstack/react-query";
-import { Menu, Bell, LogOut, User as UserIcon, Search, AlertTriangle } from "lucide-react";
+import {
+  Menu,
+  Bell,
+  LogOut,
+  User as UserIcon,
+  Search,
+  CheckCircle2,
+  Wallet,
+} from "lucide-react";
 import { apiFetch } from "@/lib/fetcher";
 import { formatCurrency } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -32,7 +40,27 @@ export function Topbar({ onMenu }: { onMenu: () => void }) {
     refetchInterval: 120000,
     enabled: !!canSeePanels,
   });
-  const lowCount = lowBal?.count ?? 0;
+  // Build a friendly, easy-to-read notification list from live data.
+  type Notif = {
+    id: string;
+    tone: "warning" | "info" | "success";
+    icon: React.ReactNode;
+    title: string;
+    detail: string;
+    href?: string;
+  };
+  const notifs: Notif[] = [];
+  for (const p of lowBal?.panels.slice(0, 6) ?? []) {
+    notifs.push({
+      id: `low-${p.name}`,
+      tone: "warning",
+      icon: <Wallet className="h-4 w-4" />,
+      title: `Low balance — ${p.name}`,
+      detail: `Only ${formatCurrency(p.balance, p.currency)} left. Top up soon to avoid failed orders.`,
+      href: "/panels",
+    });
+  }
+  const unreadCount = notifs.length;
   const initials = (user?.name || user?.email || "A")
     .split(/[\s@.]/)
     .filter(Boolean)
@@ -64,42 +92,100 @@ export function Topbar({ onMenu }: { onMenu: () => void }) {
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className="relative" aria-label="Notifications">
-              <Bell className="h-5 w-5" />
-              {lowCount > 0 && (
-                <span className="absolute -right-0.5 -top-0.5 flex min-w-[18px] items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-bold leading-none text-white ring-2 ring-background">
-                  {lowCount}
-                </span>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="relative h-11 w-11 rounded-xl transition-colors hover:bg-secondary"
+              aria-label="Notifications"
+            >
+              <Bell
+                className={`h-5 w-5 transition-transform ${unreadCount > 0 ? "text-primary" : ""}`}
+              />
+              {unreadCount > 0 && (
+                <>
+                  {/* pulsing ring to draw the eye */}
+                  <span className="absolute -right-0.5 -top-0.5 flex h-5 w-5">
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-destructive/60" />
+                  </span>
+                  <span className="absolute -right-0.5 -top-0.5 flex h-5 min-w-[20px] items-center justify-center rounded-full bg-gradient-to-br from-rose-500 to-red-600 px-1 text-[11px] font-bold leading-none text-white shadow-md ring-2 ring-background">
+                    {unreadCount}
+                  </span>
+                </>
               )}
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-80">
-            <DropdownMenuLabel>Notifications</DropdownMenuLabel>
-            <DropdownMenuSeparator />
-            {lowCount > 0 ? (
-              <>
-                {lowBal?.panels.slice(0, 6).map((p, i) => (
-                  <div key={i} className="flex items-start gap-2.5 px-2 py-2">
-                    <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-warning/15">
-                      <AlertTriangle className="h-4 w-4 text-warning" />
-                    </span>
-                    <div className="min-w-0 flex-1 text-sm">
-                      <p className="font-medium">Low balance: {p.name}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {formatCurrency(p.balance, p.currency)} remaining
-                      </p>
+          <DropdownMenuContent align="end" className="w-[22rem] overflow-hidden p-0">
+            {/* Header */}
+            <div className="flex items-center justify-between bg-gradient-to-r from-primary/10 to-transparent px-4 py-3">
+              <div className="flex items-center gap-2">
+                <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/15">
+                  <Bell className="h-4 w-4 text-primary" />
+                </span>
+                <div>
+                  <p className="text-sm font-semibold leading-none">Notifications</p>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    {unreadCount > 0 ? `${unreadCount} need your attention` : "Everything looks good"}
+                  </p>
+                </div>
+              </div>
+              {unreadCount > 0 && (
+                <span className="rounded-full bg-destructive/15 px-2 py-0.5 text-xs font-bold text-destructive">
+                  {unreadCount}
+                </span>
+              )}
+            </div>
+
+            <div className="max-h-[24rem] overflow-y-auto scrollbar-thin">
+              {notifs.length > 0 ? (
+                notifs.map((n) => {
+                  const tone =
+                    n.tone === "warning"
+                      ? { bg: "bg-warning/15", text: "text-warning", bar: "bg-warning" }
+                      : n.tone === "success"
+                        ? { bg: "bg-success/15", text: "text-success", bar: "bg-success" }
+                        : { bg: "bg-primary/15", text: "text-primary", bar: "bg-primary" };
+                  const body = (
+                    <div className="relative flex items-start gap-3 px-4 py-3 transition-colors hover:bg-secondary/50">
+                      <span className={`absolute left-0 top-0 h-full w-1 ${tone.bar}`} />
+                      <span
+                        className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${tone.bg} ${tone.text}`}
+                      >
+                        {n.icon}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold leading-snug">{n.title}</p>
+                        <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                          {n.detail}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                ))}
-                <DropdownMenuSeparator />
-                <DropdownMenuItem asChild>
-                  <a href="/panels" className="justify-center text-primary">View all panels</a>
-                </DropdownMenuItem>
-              </>
-            ) : (
-              <p className="px-3 py-6 text-center text-sm text-muted-foreground">
-                You&apos;re all caught up 🎉
-              </p>
+                  );
+                  return n.href ? (
+                    <a key={n.id} href={n.href} className="block">
+                      {body}
+                    </a>
+                  ) : (
+                    <div key={n.id}>{body}</div>
+                  );
+                })
+              ) : (
+                <div className="flex flex-col items-center justify-center gap-2 px-4 py-10 text-center">
+                  <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-success/15">
+                    <CheckCircle2 className="h-6 w-6 text-success" />
+                  </span>
+                  <p className="text-sm font-medium">You&apos;re all caught up</p>
+                  <p className="text-xs text-muted-foreground">No alerts right now 🎉</p>
+                </div>
+              )}
+            </div>
+
+            {notifs.length > 0 && (
+              <a
+                href="/panels"
+                className="block border-t border-border/60 py-2.5 text-center text-sm font-medium text-primary transition-colors hover:bg-secondary/50"
+              >
+                View all panels
+              </a>
             )}
           </DropdownMenuContent>
         </DropdownMenu>

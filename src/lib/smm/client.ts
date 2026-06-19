@@ -125,13 +125,19 @@ export class SmmClient {
     return this.call<SmmBalance>({ action: "balance" });
   }
 
-  async addOrder(opts: { service: string | number; link: string; quantity: number; runs?: number; interval?: number }) {
+  async addOrder(opts: { service: string | number; link: string; quantity: number; runs?: number; interval?: number; comments?: string }) {
     const params: Record<string, string | number> = {
       action: "add",
       service: opts.service,
       link: opts.link,
-      quantity: opts.quantity,
     };
+    // Custom-comments services take a newline-separated `comments` list instead
+    // of a numeric quantity (quantity is implied by the number of comments).
+    if (opts.comments && opts.comments.trim()) {
+      params.comments = opts.comments;
+    } else {
+      params.quantity = opts.quantity;
+    }
     if (opts.runs) params.runs = opts.runs;
     if (opts.interval) params.interval = opts.interval;
 

@@ -15,6 +15,7 @@ export interface BoostAllocation {
   quantity: number;
   estCost: number;
   rate: number;
+  comments?: string; // custom comments (one per line) for COMMENT boosts
 }
 
 export interface BoostPlanItem {
@@ -74,12 +75,23 @@ export async function planAutoBoost(input: AutoBoostInput): Promise<BoostPlan> {
 
   for (const boost of input.boosts) {
     const boostType = boost.boostType;
-    const baseQuantity = resolveQuantity({
-      mode: boost.quantityMode,
-      fixed: boost.fixedQuantity,
-      min: boost.minQuantity,
-      max: boost.maxQuantity,
-    });
+
+    // For COMMENT boosts with custom comments, the quantity is the number of
+    // non-empty comment lines, and the same comment list goes to each panel.
+    const commentLines =
+      boostType === "COMMENT" && boost.comments
+        ? boost.comments.split("\n").map((l) => l.trim()).filter(Boolean)
+        : [];
+    const customComments = commentLines.length ? commentLines.join("\n") : undefined;
+
+    const baseQuantity = customComments
+      ? commentLines.length
+      : resolveQuantity({
+          mode: boost.quantityMode,
+          fixed: boost.fixedQuantity,
+          min: boost.minQuantity,
+          max: boost.maxQuantity,
+        });
 
     const candidates = await candidatesFor(boostType, input.platform, input.panelIds);
     if (!candidates.length) {
@@ -97,7 +109,15 @@ export async function planAutoBoost(input: AutoBoostInput): Promise<BoostPlan> {
       .map((c) => {
         const manualForPanel = input.manualQuantities?.[c.panelId];
         let qty: number;
-        if (input.manualMode) {
+        if (customComments) {
+          // Custom comments: quantity is fixed by the comment list for every panel.
+          // In manual mode, a 0/absent entry still means "skip this panel".
+          if (input.manualMode) {
+            const manual = manualForPanel?.[boostType];
+            if (manual == null || manual <= 0) return null;
+          }
+          qty = baseQuantity;
+        } else if (input.manualMode) {
           const manual = manualForPanel?.[boostType];
           if (manual == null || manual <= 0) return null; // not selected for this panel
           qty = manual;
@@ -114,6 +134,7 @@ export async function planAutoBoost(input: AutoBoostInput): Promise<BoostPlan> {
           quantity: qty,
           estCost,
           rate: c.ratePer1000,
+          comments: customComments,
         };
       })
       .filter((a): a is NonNullable<typeof a> => a !== null);
@@ -155,6 +176,7 @@ export async function executeAutoBoost(input: AutoBoostInput, userId: string) {
       quantity: j.alloc.quantity,
       cost: j.alloc.estCost,
       remains: j.alloc.quantity,
+      comments: j.alloc.comments ?? null,
       status: "PENDING" as const,
       providerOrderId: null,
       submitAttempts: 0,
@@ -209,6 +231,7 @@ async function submitOrdersByIds(ids: string[]) {
       service: order.serviceId,
       link: order.postUrl,
       quantity: order.quantity,
+      comments: order.comments ?? undefined,
     });
 
     if (res.ok && res.data?.order) {
@@ -294,6 +317,7 @@ export async function submitPendingOrders(limit = 200) {
         service: order.serviceId,
         link: order.postUrl,
         quantity: order.quantity,
+        comments: order.comments ?? undefined,
       });
 
       if (res.ok && res.data?.order) {

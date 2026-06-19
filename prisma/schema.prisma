@@ -242,6 +242,8 @@ model Order {
   status        OrderStatus @default(PENDING)
   providerOrderId String?
   errorMessage  String?
+  // Custom comments (newline-separated) for COMMENT orders, if provided.
+  comments      String?
   // Background submission tracking: how many submit attempts, and when to retry.
   submitAttempts Int        @default(0)
   nextRetryAt    DateTime?

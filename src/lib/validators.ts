@@ -35,12 +35,17 @@ export const boostConfigSchema = z
     fixedQuantity: z.coerce.number().int().positive().optional(),
     minQuantity: z.coerce.number().int().positive().optional(),
     maxQuantity: z.coerce.number().int().positive().optional(),
+    // Custom comments (one per line) — only used for COMMENT boosts. When set,
+    // the order quantity is the number of comment lines.
+    comments: z.string().optional(),
   })
   .refine(
     (b) =>
-      b.quantityMode === "fixed"
+      // COMMENT boosts with custom comments don't need a numeric quantity.
+      (b.boostType === "COMMENT" && !!b.comments && b.comments.trim().length > 0) ||
+      (b.quantityMode === "fixed"
         ? !!b.fixedQuantity
-        : b.minQuantity != null && b.maxQuantity != null,
+        : b.minQuantity != null && b.maxQuantity != null),
     { message: "Provide quantity values for the selected mode", path: ["fixedQuantity"] },
   )
   .refine(

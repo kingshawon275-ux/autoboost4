@@ -76,6 +76,7 @@ interface BoostCfg {
   fixed: string;
   min: string;
   max: string;
+  comments?: string; // custom comments (one per line) — COMMENT boost only
 }
 const DEFAULT_CFG: BoostCfg = { mode: "fixed", fixed: "1000", min: "30", max: "35" };
 
@@ -85,6 +86,7 @@ interface SavedBoost {
   fixedQuantity?: number;
   minQuantity?: number;
   maxQuantity?: number;
+  comments?: string;
 }
 interface Preset {
   id: string;
@@ -168,6 +170,7 @@ export function AutoBoostClient() {
         fixed: String(b.fixedQuantity ?? 1000),
         min: String(b.minQuantity ?? 30),
         max: String(b.maxQuantity ?? 35),
+        comments: b.comments ?? undefined,
       };
     }
     setBoostConfigs(cfgs);
@@ -228,6 +231,7 @@ export function AutoBoostClient() {
             fixedQuantity: c.mode === "fixed" ? Number(c.fixed) : undefined,
             minQuantity: c.mode === "random" ? Number(c.min) : undefined,
             maxQuantity: c.mode === "random" ? Number(c.max) : undefined,
+            comments: boostType === "COMMENT" && c.comments?.trim() ? c.comments : undefined,
           })),
           manualMode,
           manualQty: manualMode ? manualQty : undefined,
@@ -356,6 +360,7 @@ export function AutoBoostClient() {
         fixedQuantity: c.mode === "fixed" ? Number(c.fixed) : undefined,
         minQuantity: c.mode === "random" ? Number(c.min) : undefined,
         maxQuantity: c.mode === "random" ? Number(c.max) : undefined,
+        comments: boostType === "COMMENT" && c.comments?.trim() ? c.comments : undefined,
       })),
       dryRun,
     };
@@ -607,19 +612,43 @@ export function AutoBoostClient() {
                           <div className="flex items-center gap-2 text-sm font-semibold">
                             <span className="text-lg">{b.emoji}</span> {b.label}
                           </div>
-                          <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                            <Wand2 className="h-3.5 w-3.5 text-primary" /> Random
-                            <Switch
-                              checked={cfg.mode === "random"}
-                              onCheckedChange={(c) =>
-                                updateBoost(b.value, { mode: c ? "random" : "fixed" })
-                              }
-                            />
-                          </label>
+                          {b.value !== "COMMENT" && (
+                            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                              <Wand2 className="h-3.5 w-3.5 text-primary" /> Random
+                              <Switch
+                                checked={cfg.mode === "random"}
+                                onCheckedChange={(c) =>
+                                  updateBoost(b.value, { mode: c ? "random" : "fixed" })
+                                }
+                              />
+                            </label>
+                          )}
                         </div>
 
                         <div className="px-3 pb-3">
-                          {cfg.mode === "fixed" ? (
+                          {b.value === "COMMENT" ? (
+                            <div className="space-y-2">
+                              <Label className="text-xs">Custom comments — one per line</Label>
+                              <textarea
+                                value={cfg.comments ?? ""}
+                                onChange={(e) => updateBoost(b.value, { comments: e.target.value })}
+                                rows={5}
+                                placeholder={"Nice post! 🔥\nLove this\nAmazing content"}
+                                className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none ring-primary/40 focus:ring-2"
+                              />
+                              <p className="text-xs text-muted-foreground">
+                                {(() => {
+                                  const n = (cfg.comments ?? "")
+                                    .split("\n")
+                                    .map((l) => l.trim())
+                                    .filter(Boolean).length;
+                                  return n > 0
+                                    ? `${n} comment${n > 1 ? "s" : ""} — quantity will be ${n}.`
+                                    : "Leave empty to use a normal quantity (random comments from the panel).";
+                                })()}
+                              </p>
+                            </div>
+                          ) : cfg.mode === "fixed" ? (
                             <div className="space-y-2">
                               <Input
                                 type="number"

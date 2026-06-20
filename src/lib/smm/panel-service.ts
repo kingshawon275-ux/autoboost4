@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { SmmClient, type SmmService } from "@/lib/smm/client";
 import { withRetry } from "@/lib/db-retry";
 import { emitUpdate } from "@/lib/realtime";
+import { mapLimit } from "@/lib/concurrency";
 
 async function logApi(opts: {
   panelId?: string;
@@ -249,15 +250,17 @@ export async function syncAllBalances() {
     where: { enabled: true },
     select: { id: true },
   });
+  // Run all panels in parallel (bounded) so total time ≈ the slowest single
+  // panel, not the sum of all of them. With keep-alive this is much faster.
   let ok = 0;
-  for (const p of panels) {
+  await mapLimit(panels, 10, async (p) => {
     try {
       const res = await syncBalance(p.id);
       if (res.ok) ok++;
     } catch {
       /* keep going on per-panel failure */
     }
-  }
+  });
   return { panels: panels.length, ok };
 }
 
@@ -267,14 +270,17 @@ export async function syncAllServices() {
     where: { enabled: true },
     select: { id: true },
   });
+  // Parallel but limited — catalogues can be huge (tens of thousands), so keep
+  // concurrency modest to avoid spiking memory while still being far faster
+  // than syncing panels one-by-one.
   let total = 0;
-  for (const p of panels) {
+  await mapLimit(panels, 3, async (p) => {
     try {
       const res = await syncServices(p.id);
       if (res.ok) total += res.count;
     } catch {
       /* keep going on per-panel failure */
     }
-  }
+  });
   return { panels: panels.length, services: total };
 }

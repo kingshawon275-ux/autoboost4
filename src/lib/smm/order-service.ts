@@ -272,6 +272,19 @@ async function submitOrdersByIds(ids: string[]) {
       await markFailed(order.id, "Missing panel/service");
       return false;
     }
+
+    // CLAIM the order atomically before sending it to the panel. updateMany only
+    // flips it if it's still PENDING with no provider id, so if the background
+    // scheduler (or another run) already grabbed it, claimed.count === 0 and we
+    // skip — this prevents the SAME order being sent to the panel twice (the
+    // duplicate-order bug). We mark it PROCESSING up-front; commitSuccess sets
+    // the real providerOrderId, or we roll back to PENDING on a transient fail.
+    const claimed = await prisma.order.updateMany({
+      where: { id: order.id, status: "PENDING", providerOrderId: null },
+      data: { status: "PROCESSING" },
+    });
+    if (claimed.count === 0) return false; // someone else is sending it
+
     const client = new SmmClient(order.panel.apiUrl, order.panel.apiKey);
     const callStart = Date.now();
     const res = await client.addOrder({
@@ -294,12 +307,14 @@ async function submitOrdersByIds(ids: string[]) {
       await markFailed(order.id, res.error ?? "Provider rejected order");
       return false;
     } else {
-      // Temporary (active-order / network) → retry via background queue.
+      // Temporary (active-order / network) → roll back to PENDING so the
+      // background queue retries it (and the claim guard works again).
       const wait = isActiveOrderError(res.error) ? 60_000 : 5_000;
       await prisma.order
         .update({
           where: { id: order.id },
           data: {
+            status: "PENDING",
             nextRetryAt: new Date(Date.now() + wait),
             errorMessage: "Waiting for the previous order on this link…",
           },
@@ -365,6 +380,15 @@ export async function submitPendingOrders(limit = 200) {
         failed++;
         return;
       }
+
+      // Atomically claim before sending — prevents this order being submitted
+      // twice (e.g. by a concurrent instant-submit). Skip if already claimed.
+      const claimed = await prisma.order.updateMany({
+        where: { id: order.id, status: "PENDING", providerOrderId: null },
+        data: { status: "PROCESSING" },
+      });
+      if (claimed.count === 0) return;
+
       const client = new SmmClient(order.panel.apiUrl, order.panel.apiKey);
       const res = await client.addOrder({
         service: order.serviceId,
@@ -392,7 +416,8 @@ export async function submitPendingOrders(limit = 200) {
           .update({
             where: { id: order.id },
             data: {
-              // don't increment attempts — this isn't a failure, just a wait.
+              // roll back to PENDING so it's retried; don't count as an attempt.
+              status: "PENDING",
               nextRetryAt: new Date(Date.now() + 60_000),
               errorMessage: "Waiting for the previous order on this link…",
             },
@@ -405,6 +430,7 @@ export async function submitPendingOrders(limit = 200) {
           .update({
             where: { id: order.id },
             data: {
+              status: "PENDING", // roll back so the claim guard works next time
               submitAttempts: attempts,
               nextRetryAt: new Date(Date.now() + backoffMs),
               errorMessage: "Network issue, retrying…",

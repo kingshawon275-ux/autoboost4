@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -25,6 +26,7 @@ interface Mapping {
   id: string;
   boostType: string;
   platform: string;
+  enabled: boolean;
   panel: { id: string; name: string };
   service: { id: string; name: string; serviceId: string; rate: number };
 }
@@ -91,6 +93,19 @@ export function MappingsManager() {
       await apiFetch(`/api/mappings/${id}`, { method: "DELETE" });
       qc.invalidateQueries({ queryKey: ["mappings"] });
       toast.success("Mapping removed");
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  }
+
+  async function toggle(id: string, enabled: boolean) {
+    try {
+      await apiFetch(`/api/mappings/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled }),
+      });
+      qc.invalidateQueries({ queryKey: ["mappings"] });
+      toast.success(enabled ? "Mapping turned ON" : "Mapping turned OFF");
     } catch (e) {
       toast.error((e as Error).message);
     }
@@ -214,7 +229,9 @@ export function MappingsManager() {
             mappings.map((m) => (
               <div
                 key={m.id}
-                className="flex items-center justify-between rounded-lg border border-border p-3"
+                className={`flex items-center justify-between rounded-lg border p-3 transition-opacity ${
+                  m.enabled ? "border-border" : "border-border/50 opacity-60"
+                }`}
               >
                 <div className="flex flex-wrap items-center gap-2 text-sm">
                   <Badge variant="default">{m.boostType}</Badge>
@@ -224,10 +241,23 @@ export function MappingsManager() {
                   <span className="text-muted-foreground">
                     #{m.service.serviceId} · {formatCurrency(m.service.rate)}/1k
                   </span>
+                  {!m.enabled && <Badge variant="outline">OFF</Badge>}
                 </div>
-                <Button variant="ghost" size="icon" onClick={() => remove(m.id)}>
-                  <Trash2 className="h-4 w-4 text-destructive" />
-                </Button>
+                <div className="flex items-center gap-3">
+                  {/* ON/OFF — disabled mappings are skipped when routing orders */}
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <span className={m.enabled ? "text-success" : ""}>
+                      {m.enabled ? "ON" : "OFF"}
+                    </span>
+                    <Switch
+                      checked={m.enabled}
+                      onCheckedChange={(v) => toggle(m.id, v)}
+                    />
+                  </label>
+                  <Button variant="ghost" size="icon" onClick={() => remove(m.id)}>
+                    <Trash2 className="h-4 w-4 text-destructive" />
+                  </Button>
+                </div>
               </div>
             ))
           ) : (

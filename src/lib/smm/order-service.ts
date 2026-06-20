@@ -76,7 +76,10 @@ async function candidatesFor(
 
   const candidates: PanelCandidate[] = [];
   for (const m of mappings) {
-    if (!m.panel.enabled || m.panel.status === "DISABLED") continue;
+    // Only skip explicitly-disabled panels. A panel showing "ERROR" (a
+    // transient balance/sync hiccup) can still accept orders, so we DON'T skip
+    // it here — otherwise services silently go missing.
+    if (!m.panel.enabled) continue;
     candidates.push({
       panelId: m.panelId,
       panelName: m.panel.name,
@@ -206,6 +209,15 @@ export async function executeAutoBoost(input: AutoBoostInput, userId: string) {
   for (const item of plan.items) {
     for (const alloc of item.allocations) jobs.push({ boostType: item.boostType, alloc });
   }
+
+  // Visibility: log exactly what was planned so any "missing service" is obvious
+  // in pm2 logs (which boost on which panel, and any warnings that dropped one).
+  console.log(
+    `[plan] ${input.boosts.length} boost(s) x ${input.panelIds.length} panel(s) selected -> ${jobs.length} order(s):`,
+    jobs.map((j) => `${j.alloc.panelName}/${j.boostType}`).join(", ") || "(none)",
+  );
+  if (plan.warnings.length) console.log(`[plan] warnings: ${plan.warnings.join(" | ")}`);
+
   if (!jobs.length) return { batchId, plan, orders: [] };
 
   // 1) Save ALL orders instantly as PENDING (one bulk insert). This never times
@@ -283,7 +295,10 @@ async function submitOrdersByIds(ids: string[]) {
       where: { id: order.id, status: "PENDING", providerOrderId: null },
       data: { status: "PROCESSING" },
     });
-    if (claimed.count === 0) return false; // someone else is sending it
+    if (claimed.count === 0) {
+      console.log(`[submit] skip ${order.panel.name}/${order.boostType} (already claimed)`);
+      return false; // someone else is sending it
+    }
 
     const client = new SmmClient(order.panel.apiUrl, order.panel.apiKey);
     const callStart = Date.now();

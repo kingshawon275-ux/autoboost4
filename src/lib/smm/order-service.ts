@@ -324,14 +324,25 @@ async function submitOrdersByIds(ids: string[]) {
     }
   };
 
-  // Submit everything in PARALLEL for maximum speed — most panels accept many
-  // services on the same link at once (no collision). If a panel ever returns
-  // "You have active order with this link", that order is simply retried by the
-  // background queue (isActiveOrderError) instead of failing — so it's never
-  // lost and every other order still goes out at full speed.
-  await mapLimit(orders, 25, async (order) => {
-    const ok = await submitOne(order);
-    if (ok) anyOk = true;
+  // Many panels reject a 2nd order on the SAME link while one is still active
+  // ("You have active order with this link"). So orders that share panel+link
+  // (e.g. like+love+care on one post via one panel) are sent SEQUENTIALLY — the
+  // next only after the previous is accepted — while DIFFERENT panels/links run
+  // in PARALLEL. This avoids the collision so every service is accepted on the
+  // first try instead of some being pushed to the 60s retry queue.
+  const groups = new Map<string, typeof orders>();
+  for (const o of orders) {
+    const key = `${o.panelId}::${o.postUrl}`;
+    const arr = groups.get(key);
+    if (arr) arr.push(o);
+    else groups.set(key, [o]);
+  }
+
+  await mapLimit([...groups.values()], 25, async (group) => {
+    for (const order of group) {
+      const ok = await submitOne(order);
+      if (ok) anyOk = true;
+    }
   });
 
   console.log(`[submit] ${orders.length} order(s) sent in ${Date.now() - t0}ms total`);
@@ -355,14 +366,41 @@ export async function submitPendingOrders(limit = 200) {
   submitting = true;
   try {
     const now = Date.now();
-    // Fetch PENDING orders; filter "due for retry" in JS so the query doesn't
-    // depend on the nextRetryAt column existing (robust across schema versions).
-    const due = await prisma.order.findMany({
-      where: { status: "PENDING" },
-      include: { panel: true },
-      take: limit,
-      orderBy: { createdAt: "asc" },
-    });
+    // Fetch orders that still need submitting. This includes PENDING orders AND
+    // "ghost" PROCESSING orders that were claimed but never got a providerOrderId
+    // (e.g. the process restarted mid-submit) — otherwise such an order would be
+    // stuck forever and look like "it never went to the panel". We recover any
+    // PROCESSING+no-provider order older than 30s back into the retry flow.
+    const ghostCutoff = new Date(now - 30_000);
+    const [pendingRaw, ghosts] = await Promise.all([
+      prisma.order.findMany({
+        where: { status: "PENDING" },
+        include: { panel: true },
+        take: limit,
+        orderBy: { createdAt: "asc" },
+      }),
+      prisma.order.findMany({
+        where: { status: "PROCESSING", updatedAt: { lt: ghostCutoff } },
+        include: { panel: true },
+        take: limit,
+        orderBy: { createdAt: "asc" },
+      }),
+    ]);
+    // Reset ghosts to PENDING so the claim-guard works for them again.
+    const ghostIds = ghosts.filter((o) => !o.providerOrderId).map((o) => o.id);
+    if (ghostIds.length) {
+      await prisma.order
+        .updateMany({
+          where: { id: { in: ghostIds }, status: "PROCESSING", providerOrderId: null },
+          data: { status: "PENDING", nextRetryAt: new Date() },
+        })
+        .catch(() => {});
+    }
+    const ghostSet = new Set(ghostIds);
+    const due = [
+      ...pendingRaw,
+      ...ghosts.filter((o) => ghostSet.has(o.id)).map((o) => ({ ...o, status: "PENDING" as const })),
+    ];
     const pending = due.filter((o) => {
       if (o.providerOrderId) return false; // already submitted
       const next = o.nextRetryAt ? new Date(o.nextRetryAt).getTime() : 0;

@@ -49,11 +49,24 @@ app.prepare().then(() => {
           /* ignore */
         }
       };
-      // Order status + retry: every 20s. Balances: every 5 min.
+      // Fast submit-only tick (every 5s): pushes any just-rolled-back order to
+      // its panel almost immediately, so even a retried service lands fast.
+      const fastTick = async () => {
+        try {
+          await fetch(
+            `http://127.0.0.1:${port}/api/cron/sync?key=${encodeURIComponent(secret)}&submitOnly=1`,
+          ).catch(() => {});
+        } catch {
+          /* ignore */
+        }
+      };
+      // Full status sync + retry: every 20s. Submit-only: every 5s.
+      // Balances: every 5 min.
+      setInterval(fastTick, 5_000);
       setInterval(() => tick(false), 20_000);
       setInterval(() => tick(true), 5 * 60_000);
       setTimeout(() => tick(false), 4_000); // run shortly after boot
-      console.log("> Background scheduler: status/retry 20s, balances 5m");
+      console.log("> Background scheduler: submit 5s, status 20s, balances 5m");
     }
   });
 });

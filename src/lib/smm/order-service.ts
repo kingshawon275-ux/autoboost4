@@ -307,16 +307,17 @@ async function submitOrdersByIds(ids: string[]) {
       await markFailed(order.id, res.error ?? "Provider rejected order");
       return false;
     } else {
-      // Temporary (active-order / network) → roll back to PENDING so the
-      // background queue retries it (and the claim guard works again).
-      const wait = isActiveOrderError(res.error) ? 60_000 : 5_000;
+      // Temporary (active-order / network) → roll back to PENDING and retry very
+      // soon (≈1.5s) so the service still lands on the post almost instantly,
+      // instead of waiting a full minute.
+      const wait = isActiveOrderError(res.error) ? 1_500 : 3_000;
       await prisma.order
         .update({
           where: { id: order.id },
           data: {
             status: "PENDING",
             nextRetryAt: new Date(Date.now() + wait),
-            errorMessage: "Waiting for the previous order on this link…",
+            errorMessage: "Resending…",
           },
         })
         .catch(() => {});
@@ -324,25 +325,14 @@ async function submitOrdersByIds(ids: string[]) {
     }
   };
 
-  // Many panels reject a 2nd order on the SAME link while one is still active
-  // ("You have active order with this link"). So orders that share panel+link
-  // (e.g. like+love+care on one post via one panel) are sent SEQUENTIALLY — the
-  // next only after the previous is accepted — while DIFFERENT panels/links run
-  // in PARALLEL. This avoids the collision so every service is accepted on the
-  // first try instead of some being pushed to the 60s retry queue.
-  const groups = new Map<string, typeof orders>();
-  for (const o of orders) {
-    const key = `${o.panelId}::${o.postUrl}`;
-    const arr = groups.get(key);
-    if (arr) arr.push(o);
-    else groups.set(key, [o]);
-  }
-
-  await mapLimit([...groups.values()], 25, async (group) => {
-    for (const order of group) {
-      const ok = await submitOne(order);
-      if (ok) anyOk = true;
-    }
+  // Fire EVERY order at its panel in PARALLEL — fully instant, no waiting. Most
+  // panels accept many different services on the same link at once. If a panel
+  // does reject one with "active order with this link", submitOne rolls it back
+  // to PENDING with only a ~1.5s retry (not 60s), so it's resent almost
+  // immediately and still lands on the post within a couple of seconds.
+  await mapLimit(orders, 50, async (order) => {
+    const ok = await submitOne(order);
+    if (ok) anyOk = true;
   });
 
   console.log(`[submit] ${orders.length} order(s) sent in ${Date.now() - t0}ms total`);

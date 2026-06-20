@@ -66,8 +66,8 @@ async function getDispatcher(): Promise<unknown> {
       Agent: new (opts: Record<string, unknown>) => unknown;
     };
     sharedDispatcher = new mod.Agent({
-      keepAliveTimeout: 60_000, // keep idle sockets 60s
-      keepAliveMaxTimeout: 600_000,
+      keepAliveTimeout: 5 * 60_000, // keep idle sockets warm for 5 min
+      keepAliveMaxTimeout: 10 * 60_000,
       connections: 64, // per origin
       pipelining: 1,
       connect: { timeout: 15_000 },
@@ -176,15 +176,17 @@ export class SmmClient {
     if (opts.interval) params.interval = opts.interval;
 
     // Retry transient network errors (fetch failed / timeout / 5xx) up to 3x.
-    // A real provider rejection (error in JSON) is NOT retried.
+    // A real provider rejection (error in JSON) is NOT retried. Use a shorter
+    // per-attempt timeout so a single slow panel can't stall submission for
+    // 30s; transient failures fall back to the background retry queue anyway.
     let last: SmmCallResult<SmmAddResponse> | null = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const res = await this.call<SmmAddResponse>(params, 30000);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await this.call<SmmAddResponse>(params, 15000);
       // Success, or a definite provider rejection → return immediately.
       if (res.ok || (res.status >= 400 && res.status < 500 && res.data)) return res;
       last = res;
-      // transient (status 0 = network/timeout, or 5xx) → wait and retry
-      await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+      // transient (status 0 = network/timeout, or 5xx) → brief wait and retry
+      await new Promise((r) => setTimeout(r, 300));
     }
     return last as SmmCallResult<SmmAddResponse>;
   }

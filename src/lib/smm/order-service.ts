@@ -257,6 +257,7 @@ export async function executeAutoBoost(input: AutoBoostInput, userId: string) {
  */
 async function submitOrdersByIds(ids: string[]) {
   if (!ids.length) return;
+  const t0 = Date.now();
   const orders = await prisma.order.findMany({
     where: { id: { in: ids } },
     include: { panel: true },
@@ -272,12 +273,18 @@ async function submitOrdersByIds(ids: string[]) {
       return false;
     }
     const client = new SmmClient(order.panel.apiUrl, order.panel.apiKey);
+    const callStart = Date.now();
     const res = await client.addOrder({
       service: order.serviceId,
       link: order.postUrl,
       quantity: order.quantity,
       comments: order.comments ?? undefined,
     });
+    console.log(
+      `[submit] ${order.panel.name} ${order.boostType} -> ${
+        res.ok ? "OK" : res.error?.slice(0, 40)
+      } in ${Date.now() - callStart}ms`,
+    );
 
     if (res.ok && res.data?.order) {
       await commitSuccess(order, String(res.data.order));
@@ -312,6 +319,7 @@ async function submitOrdersByIds(ids: string[]) {
     if (ok) anyOk = true;
   });
 
+  console.log(`[submit] ${orders.length} order(s) sent in ${Date.now() - t0}ms total`);
   if (anyOk) emitUpdate("orders", "dashboard", "panels");
 }
 

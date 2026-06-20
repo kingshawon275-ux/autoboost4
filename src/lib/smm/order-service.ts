@@ -237,7 +237,11 @@ export async function executeAutoBoost(input: AutoBoostInput, userId: string) {
       status: "PENDING" as const,
       providerOrderId: null,
       submitAttempts: 0,
-      nextRetryAt: new Date(), // ready to submit now
+      // Give the instant submit below the first shot — hold the background
+      // scheduler off for 15s so it doesn't race and claim these same orders
+      // (which caused some to be silently skipped). If instant submit fails, it
+      // rolls back with a sooner nextRetryAt and the scheduler picks it up.
+      nextRetryAt: new Date(Date.now() + 15_000),
       panelId: j.alloc.panelId,
       serviceId: j.alloc.serviceId,
       userId,
@@ -562,7 +566,9 @@ type SubmittableOrder = {
  * and the balance is corrected by the next balance sync.
  */
 async function commitSuccess(order: SubmittableOrder, providerOrder: string) {
-  // 1) The essential write — never let this fail.
+  // 1) The ESSENTIAL write — the order must record its providerOrderId, or it
+  // looks unsent (and a ghost-recovery could resend it = duplicate). This is a
+  // single-document update, so it never deadlocks against other orders.
   await withRetry(() =>
     prisma.order.update({
       where: { id: order.id },
@@ -591,12 +597,11 @@ async function commitSuccess(order: SubmittableOrder, providerOrder: string) {
     }),
   ).catch(() => {});
 
-  await withRetry(() =>
-    prisma.panel.update({
-      where: { id: order.panelId },
-      data: { balance: { decrement: order.cost } },
-    }),
-  ).catch(() => {});
+  // NOTE: we intentionally do NOT decrement the panel balance here. When many
+  // orders hit the SAME panel at once, every order updating that one panel
+  // document caused MongoDB write-conflict/deadlocks. The balance is refreshed
+  // from the provider by the periodic balance sync instead, which is accurate
+  // and never conflicts.
 }
 
 

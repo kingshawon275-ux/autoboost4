@@ -286,40 +286,12 @@ async function submitOrdersByIds(ids: string[]) {
       await commitSuccess(order, String(res.data.order));
       return true;
     } else if (isPermanentError(res.error)) {
-      // Hard rejection (balance / invalid link…) → fail now.
+      // Hard rejection (balance / invalid link / min quantity…) → fail now.
       await markFailed(order.id, res.error ?? "Provider rejected order");
       return false;
-    } else if (isActiveOrderError(res.error)) {
-      // Same link already has an active order on this panel. Retry RIGHT HERE a
-      // few times (short gaps) so it lands in seconds, not after a long wait.
-      for (let attempt = 0; attempt < 5; attempt++) {
-        await new Promise((r) => setTimeout(r, 2000));
-        const retry = await client.addOrder({
-          service: order.serviceId,
-          link: order.postUrl,
-          quantity: order.quantity,
-          comments: order.comments ?? undefined,
-        });
-        if (retry.ok && retry.data?.order) {
-          await commitSuccess(order, String(retry.data.order));
-          return true;
-        }
-        if (isPermanentError(retry.error)) {
-          await markFailed(order.id, retry.error ?? "Provider rejected order");
-          return false;
-        }
-        if (!isActiveOrderError(retry.error)) break;
-      }
-      // Still blocked → short retry via the background queue (not a long wait).
-      await prisma.order
-        .update({
-          where: { id: order.id },
-          data: { nextRetryAt: new Date(Date.now() + 5_000), errorMessage: "Resending…" },
-        })
-        .catch(() => {});
-      return false;
     } else {
-      // Network/transient → quick background retry.
+      // Transient (network/timeout) → quick background retry. Short delay so it
+      // lands within seconds; no long waits, nothing stuck.
       await prisma.order
         .update({
           where: { id: order.id },
@@ -330,11 +302,8 @@ async function submitOrdersByIds(ids: string[]) {
     }
   };
 
-  // Submit everything in PARALLEL for maximum speed — most panels accept many
-  // services on the same link at once (no collision). If a panel ever returns
-  // "You have active order with this link", that order is simply retried by the
-  // background queue (isActiveOrderError) instead of failing — so it's never
-  // lost and every other order still goes out at full speed.
+  // Fire every order at its panel in PARALLEL — instant, all at once. (You don't
+  // double-order the same link, so there's no active-order collision to handle.)
   await mapLimit(orders, 25, async (order) => {
     const ok = await submitOne(order);
     if (ok) anyOk = true;
@@ -600,7 +569,7 @@ export async function refreshOrderStatuses(limit = 120) {
   // Check provider statuses with MODEST concurrency. Keeping this low matters on
   // a small VPS: hammering 20+ status calls every 20s saturated the network and
   // made interactive calls (balance/test) jump from ~300ms to several seconds.
-  const results = await mapLimit(orders, 6, async (order) => {
+  const results = await mapLimit(orders, 4, async (order) => {
     if (!order.panel || !order.providerOrderId) return null;
     const client = new SmmClient(order.panel.apiUrl, order.panel.apiKey);
     const res = await client.status(order.providerOrderId);

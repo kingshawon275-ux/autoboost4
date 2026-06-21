@@ -33,7 +33,12 @@ export async function testPanel(panelId: string) {
   if (!panel) throw new Error("Panel not found");
 
   const client = new SmmClient(panel.apiUrl, panel.apiKey);
-  const res = await client.ping();
+  // Retry a couple of times so a single slow response doesn't show ERROR.
+  let res = await client.ping();
+  for (let attempt = 0; attempt < 2 && !res.ok; attempt++) {
+    await new Promise((r) => setTimeout(r, 1200));
+    res = await client.ping();
+  }
 
   await prisma.panel.update({
     where: { id: panelId },
@@ -65,7 +70,13 @@ export async function syncBalance(panelId: string) {
   if (!panel) throw new Error("Panel not found");
 
   const client = new SmmClient(panel.apiUrl, panel.apiKey);
-  const res = await client.balance();
+  // A single slow/timed-out response shouldn't flap the panel to ERROR. Try a
+  // few times (short gaps) — only mark ERROR if it really can't be reached.
+  let res = await client.balance();
+  for (let attempt = 0; attempt < 2 && !(res.ok && res.data); attempt++) {
+    await new Promise((r) => setTimeout(r, 1200));
+    res = await client.balance();
+  }
 
   if (res.ok && res.data) {
     const balance = parseFloat(res.data.balance) || 0;
@@ -87,10 +98,12 @@ export async function syncBalance(panelId: string) {
     );
     await prisma.balanceSnapshot.create({ data: { panelId, balance } }).catch(() => {});
   } else {
+    // Couldn't reach the panel after retries → mark ERROR but KEEP the last
+    // known balance/currency (don't zero anything) so the row still shows data.
     await withRetry(() =>
       prisma.panel.update({
         where: { id: panelId },
-        data: { status: "ERROR", responseMs: res.durationMs },
+        data: { status: "ERROR", responseMs: res.durationMs, lastSyncedAt: new Date() },
       }),
     );
   }

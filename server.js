@@ -49,11 +49,12 @@ app.prepare().then(() => {
           /* ignore */
         }
       };
-      // Order status + retry: every 20s. Balances: every 5 min.
-      setInterval(() => tick(false), 20_000);
+      // Order status + retry: every 30s (lighter on a small VPS so interactive
+      // panel calls stay fast). Balances: every 5 min.
+      setInterval(() => tick(false), 30_000);
       setInterval(() => tick(true), 5 * 60_000);
       setTimeout(() => tick(false), 4_000); // run shortly after boot
-      console.log("> Background scheduler: status/retry 20s, balances 5m");
+      console.log("> Background scheduler: status/retry 30s, balances 5m");
     }
   });
 });

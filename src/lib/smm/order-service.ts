@@ -547,7 +547,7 @@ export async function failStuckOrders(olderThanMs = 10 * 60 * 1000) {
 }
 
 /** Poll the provider for status of in-flight orders and update our records. */
-export async function refreshOrderStatuses(limit = 500) {
+export async function refreshOrderStatuses(limit = 120) {
   // First, push any PENDING orders to the provider (and retry due ones). This
   // is isolated so a slow/failing submission can NEVER block status syncing —
   // that bug left many orders stuck "Processing" on the site while the panel
@@ -567,9 +567,10 @@ export async function refreshOrderStatuses(limit = 500) {
   const { mapProviderStatus } = await import("@/lib/smm/client");
   let updated = 0;
 
-  // Check provider statuses with bounded concurrency (fast even for hundreds of
-  // orders without hammering any one panel), then persist changes.
-  const results = await mapLimit(orders, 20, async (order) => {
+  // Check provider statuses with MODEST concurrency. Keeping this low matters on
+  // a small VPS: hammering 20+ status calls every 20s saturated the network and
+  // made interactive calls (balance/test) jump from ~300ms to several seconds.
+  const results = await mapLimit(orders, 6, async (order) => {
     if (!order.panel || !order.providerOrderId) return null;
     const client = new SmmClient(order.panel.apiUrl, order.panel.apiKey);
     const res = await client.status(order.providerOrderId);

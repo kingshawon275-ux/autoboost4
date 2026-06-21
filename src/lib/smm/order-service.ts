@@ -172,9 +172,20 @@ export async function planAutoBoost(input: AutoBoostInput): Promise<BoostPlan> {
         } else {
           qty = baseQuantity;
         }
+        // Clamp the quantity to the panel service's min/max so the panel never
+        // rejects the order with "Quantity less than minimal" / "more than max"
+        // (which was making orders go missing). We bump up to min / down to max
+        // and just note it, so every selected service actually goes through.
+        // (Custom comments can't be clamped — their count is fixed.)
+        if (!customComments && c.min && qty < c.min) {
+          warnings.push(`${c.panelName}: raised ${boostType} to min ${c.min} (was ${qty}).`);
+          qty = c.min;
+        }
+        if (!customComments && c.max && qty > c.max) {
+          warnings.push(`${c.panelName}: lowered ${boostType} to max ${c.max} (was ${qty}).`);
+          qty = c.max;
+        }
         const estCost = +(qty * (c.ratePer1000 / 1000)).toFixed(4);
-        if (qty < c.min) warnings.push(`${c.panelName}: ${qty} is below min ${c.min} for ${boostType}`);
-        if (qty > c.max) warnings.push(`${c.panelName}: ${qty} exceeds max ${c.max} for ${boostType}`);
         return {
           panelId: c.panelId,
           panelName: c.panelName,

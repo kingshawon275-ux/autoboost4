@@ -60,13 +60,29 @@ app.prepare().then(() => {
           /* ignore */
         }
       };
+      // Keep panel connections WARM. On a remote VPS the first request to each
+      // panel pays DNS + TCP + TLS (several seconds); pre-warming on an interval
+      // keeps a live keep-alive socket open so real orders go out in ~1s like
+      // they do locally. Hits a tiny internal endpoint that pings every panel.
+      const warm = async () => {
+        try {
+          await fetch(
+            `http://127.0.0.1:${port}/api/cron/sync?key=${encodeURIComponent(secret)}&warmup=1`,
+          ).catch(() => {});
+        } catch {
+          /* ignore */
+        }
+      };
+
       // Full status sync + retry: every 20s. Submit-only: every 5s.
-      // Balances: every 5 min.
+      // Warm-up: every 25s. Balances: every 5 min.
       setInterval(fastTick, 5_000);
+      setInterval(warm, 25_000);
       setInterval(() => tick(false), 20_000);
       setInterval(() => tick(true), 5 * 60_000);
+      setTimeout(() => warm(), 2_000); // warm connections right after boot
       setTimeout(() => tick(false), 4_000); // run shortly after boot
-      console.log("> Background scheduler: submit 5s, status 20s, balances 5m");
+      console.log("> Background scheduler: submit 5s, warm 25s, status 20s, balances 5m");
     }
   });
 });

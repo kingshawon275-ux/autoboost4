@@ -244,6 +244,30 @@ export async function syncServices(panelId: string) {
   return { ok: true, count, skipped, received: services.length };
 }
 
+/**
+ * Lightweight warm-up: open/keep a keep-alive connection to every panel by
+ * making a cheap balance call. Doesn't write status (so it won't flap a panel
+ * to ERROR on a single slow ping) — its only job is to keep the TCP+TLS socket
+ * hot so a real order goes out in ~1s instead of paying a cold connection.
+ */
+export async function warmPanelConnections() {
+  const panels = await prisma.panel.findMany({
+    where: { enabled: true },
+    select: { apiUrl: true, apiKey: true },
+  });
+  let warmed = 0;
+  await mapLimit(panels, 10, async (p) => {
+    try {
+      const client = new SmmClient(p.apiUrl, p.apiKey);
+      const res = await client.balance();
+      if (res.ok) warmed++;
+    } catch {
+      /* ignore — warming is best-effort */
+    }
+  });
+  return { panels: panels.length, warmed };
+}
+
 /** Sync balance for every enabled panel. Used by the background scheduler. */
 export async function syncAllBalances() {
   const panels = await prisma.panel.findMany({

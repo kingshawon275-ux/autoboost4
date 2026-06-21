@@ -560,9 +560,9 @@ export async function submitPendingOrders(limit = 200) {
 // for the same link while one is in progress. This is TEMPORARY: once the first
 // order finishes, the next is accepted. So we RETRY these (with a longer wait),
 // not fail them.
-function isActiveOrderError(error?: string | null): boolean {
-  if (!error) return false;
-  const e = error.toLowerCase();
+function isActiveOrderError(error?: unknown): boolean {
+  const e = String(error ?? "").toLowerCase();
+  if (!e) return false;
   return (
     e.includes("active order") ||
     e.includes("already") ||
@@ -574,18 +574,20 @@ function isActiveOrderError(error?: string | null): boolean {
 }
 
 // Detect a PERMANENT provider rejection (retrying won't help) → fail
-// immediately. Covers balance, invalid link/service, limits. NOTE: "active
-// order" is NOT here — that's temporary (see isActiveOrderError).
-function isPermanentError(error?: string | null): boolean {
-  if (!error) return false;
-  const e = error.toLowerCase();
+// immediately. Covers balance, invalid link/service, and quantity/limit
+// problems (e.g. "Quantity less than minimal 50"). NOTE: "active order" is NOT
+// here — that's temporary (see isActiveOrderError).
+function isPermanentError(error?: unknown): boolean {
+  const e = String(error ?? "").toLowerCase();
+  if (!e) return false;
   const permanent = [
     // balance / funds
     "balance", "fund", "insufficient", "not enough", "top up", "top-up", "topup",
     // link / service problems
     "invalid", "incorrect", "not found", "wrong link", "wrong url", "no service",
-    // limits / format
-    "min ", "max ", "minimum", "maximum",
+    // quantity / limit / format (covers "less than minimal", "min", "max", etc.)
+    "minimal", "minimum", "maximum", "less than", "more than", "quantity",
+    "min ", "max ", "out of range", "not divisible", "step",
     // generic hard rejections
     "not allowed", "disabled", "unavailable", "closed", "blocked",
   ];

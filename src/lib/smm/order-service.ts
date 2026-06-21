@@ -208,29 +208,32 @@ export async function executeAutoBoost(input: AutoBoostInput, userId: string) {
   }
   if (!jobs.length) return { batchId, plan, orders: [] };
 
-  // 1) Save ALL orders instantly as PENDING (one bulk insert). This never times
-  // out no matter how many orders — submission happens in the background.
+  // 1) Save ALL orders instantly as PENDING (one bulk insert). withRetry guards
+  // against a transient write-conflict when many users submit at the same time,
+  // so the save is always fast and reliable for everyone.
   const ids = jobs.map(() => randomBytes(12).toString("hex"));
-  await prisma.order.createMany({
-    data: jobs.map((j, i) => ({
-      id: ids[i],
-      batchId,
-      postUrl: plan.postUrl,
-      platform: plan.platform,
-      boostType: j.boostType,
-      quantity: j.alloc.quantity,
-      cost: j.alloc.estCost,
-      remains: j.alloc.quantity,
-      comments: j.alloc.comments ?? null,
-      status: "PENDING" as const,
-      providerOrderId: null,
-      submitAttempts: 0,
-      nextRetryAt: new Date(), // ready to submit now
-      panelId: j.alloc.panelId,
-      serviceId: j.alloc.serviceId,
-      userId,
-    })),
-  });
+  await withRetry(() =>
+    prisma.order.createMany({
+      data: jobs.map((j, i) => ({
+        id: ids[i],
+        batchId,
+        postUrl: plan.postUrl,
+        platform: plan.platform,
+        boostType: j.boostType,
+        quantity: j.alloc.quantity,
+        cost: j.alloc.estCost,
+        remains: j.alloc.quantity,
+        comments: j.alloc.comments ?? null,
+        status: "PENDING" as const,
+        providerOrderId: null,
+        submitAttempts: 0,
+        nextRetryAt: new Date(), // ready to submit now
+        panelId: j.alloc.panelId,
+        serviceId: j.alloc.serviceId,
+        userId,
+      })),
+    }),
+  );
 
   // Orders are saved → tell clients to refresh instantly.
   emitUpdate("orders", "dashboard");
@@ -286,16 +289,41 @@ async function submitOrdersByIds(ids: string[]) {
       // Hard rejection (balance / invalid link…) → fail now.
       await markFailed(order.id, res.error ?? "Provider rejected order");
       return false;
-    } else {
-      // Temporary (active-order / network) → retry via background queue.
-      const wait = isActiveOrderError(res.error) ? 60_000 : 5_000;
+    } else if (isActiveOrderError(res.error)) {
+      // Same link already has an active order on this panel. Retry RIGHT HERE a
+      // few times (short gaps) so it lands in seconds, not after a long wait.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const retry = await client.addOrder({
+          service: order.serviceId,
+          link: order.postUrl,
+          quantity: order.quantity,
+          comments: order.comments ?? undefined,
+        });
+        if (retry.ok && retry.data?.order) {
+          await commitSuccess(order, String(retry.data.order));
+          return true;
+        }
+        if (isPermanentError(retry.error)) {
+          await markFailed(order.id, retry.error ?? "Provider rejected order");
+          return false;
+        }
+        if (!isActiveOrderError(retry.error)) break;
+      }
+      // Still blocked → short retry via the background queue (not a long wait).
       await prisma.order
         .update({
           where: { id: order.id },
-          data: {
-            nextRetryAt: new Date(Date.now() + wait),
-            errorMessage: "Waiting for the previous order on this link…",
-          },
+          data: { nextRetryAt: new Date(Date.now() + 5_000), errorMessage: "Resending…" },
+        })
+        .catch(() => {});
+      return false;
+    } else {
+      // Network/transient → quick background retry.
+      await prisma.order
+        .update({
+          where: { id: order.id },
+          data: { nextRetryAt: new Date(Date.now() + 3_000), errorMessage: "Resending…" },
         })
         .catch(() => {});
       return false;
@@ -485,41 +513,43 @@ type SubmittableOrder = {
  * and the balance is corrected by the next balance sync.
  */
 async function commitSuccess(order: SubmittableOrder, providerOrder: string) {
-  // 1) The essential write — never let this fail.
-  await withRetry(() =>
-    prisma.order.update({
-      where: { id: order.id },
-      data: { status: "PROCESSING", providerOrderId: providerOrder, nextRetryAt: null, errorMessage: null },
-    }),
-  );
-
-  // 2) Bookkeeping — best-effort, each isolated so one conflict can't undo another.
-  await withRetry(() =>
-    prisma.orderLog.create({
-      data: { orderId: order.id, status: "PROCESSING", message: `Submitted (provider #${providerOrder})` },
-    }),
+  // The essential write — record the provider id. updateMany (not update) is a
+  // single lightweight write that won't deadlock against the bulk insert or
+  // other orders hitting the same panel, so the order is never left stuck.
+  await withRetry(
+    () =>
+      prisma.order.updateMany({
+        where: { id: order.id },
+        data: { status: "PROCESSING", providerOrderId: providerOrder, nextRetryAt: null, errorMessage: null },
+      }),
+    15,
   ).catch(() => {});
 
-  await withRetry(() =>
-    prisma.transaction.create({
-      data: {
-        type: "ORDER",
-        amount: order.cost,
-        currency: order.panel?.currency ?? "USD",
-        userId: order.userId,
-        orderId: order.id,
-        panelId: order.panelId,
-        note: `${order.boostType} x${order.quantity}`,
-      },
-    }),
-  ).catch(() => {});
+  // Bookkeeping (log + transaction) runs detached — best-effort, never blocks or
+  // fails the order.
+  void (async () => {
+    await withRetry(() =>
+      prisma.orderLog.create({
+        data: { orderId: order.id, status: "PROCESSING", message: `Submitted (provider #${providerOrder})` },
+      }),
+    ).catch(() => {});
+    await withRetry(() =>
+      prisma.transaction.create({
+        data: {
+          type: "ORDER",
+          amount: order.cost,
+          currency: order.panel?.currency ?? "USD",
+          userId: order.userId,
+          orderId: order.id,
+          panelId: order.panelId,
+          note: `${order.boostType} x${order.quantity}`,
+        },
+      }),
+    ).catch(() => {});
+  })();
 
-  await withRetry(() =>
-    prisma.panel.update({
-      where: { id: order.panelId },
-      data: { balance: { decrement: order.cost } },
-    }),
-  ).catch(() => {});
+  // Balance is NOT decremented here — many orders on one panel caused deadlocks
+  // that left orders stuck. The periodic balance sync pulls the accurate value.
 }
 
 

@@ -386,8 +386,34 @@ async function submitOrdersByIds(ids: string[]) {
     if (ok) anyOk = true;
   });
 
-  console.log(`[submit] ${orders.length} order(s) sent in ${Date.now() - t0}ms total`);
   if (anyOk) emitUpdate("orders", "dashboard", "panels");
+
+  // GUARANTEE no order is left behind. After the first pass, re-check THESE ids
+  // for any still PENDING (rolled back by a transient error / active-order) and
+  // resend them right here — up to a few rounds — so we never depend on a later
+  // scheduler tick and nothing silently goes missing.
+  for (let round = 0; round < 8; round++) {
+    const leftover = await prisma.order.findMany({
+      where: { id: { in: ids }, status: "PENDING", providerOrderId: null },
+      include: { panel: true },
+    });
+    if (leftover.length === 0) break;
+    console.log(`[submit] round ${round + 2}: resending ${leftover.length} leftover order(s)`);
+    await new Promise((r) => setTimeout(r, 4000));
+    await mapLimit(leftover, 50, async (order) => {
+      const ok = await submitOne(order);
+      if (ok) anyOk = true;
+    });
+    if (anyOk) emitUpdate("orders", "dashboard", "panels");
+  }
+
+  const stillPending = await prisma.order.count({
+    where: { id: { in: ids }, status: "PENDING", providerOrderId: null },
+  });
+  console.log(
+    `[submit] ${orders.length} order(s) done in ${Date.now() - t0}ms` +
+      (stillPending ? ` — ${stillPending} still queued for the scheduler` : " — all sent"),
+  );
 }
 
 // Prevent overlapping background runs in the same process.

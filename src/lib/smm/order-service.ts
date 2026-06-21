@@ -313,8 +313,8 @@ async function submitOrdersByIds(ids: string[]) {
       comments: order.comments ?? undefined,
     });
     console.log(
-      `[submit] ${order.panel.name} ${order.boostType} -> ${
-        res.ok ? "OK" : res.error?.slice(0, 40)
+      `[submit] ${order.panel.name} ${order.boostType} (svc ${order.serviceId}) -> ${
+        res.ok ? `OK #${res.data?.order ?? "?"}` : res.error?.slice(0, 50)
       } in ${Date.now() - callStart}ms`,
     );
 

@@ -375,23 +375,15 @@ async function submitOrdersByIds(ids: string[]) {
     }
   };
 
-  // Group by panel+link: services on the SAME link via the SAME panel are sent
-  // SEQUENTIALLY (the panel rejects a 2nd order while one is active), while
-  // different panels/links run in PARALLEL. This avoids the active-order
-  // collision entirely so every service is accepted — nothing goes missing.
-  const groups = new Map<string, typeof orders>();
-  for (const o of orders) {
-    const key = `${o.panelId}::${o.postUrl}`;
-    const arr = groups.get(key);
-    if (arr) arr.push(o);
-    else groups.set(key, [o]);
-  }
-
-  await mapLimit([...groups.values()], 50, async (group) => {
-    for (const order of group) {
-      const ok = await submitOne(order);
-      if (ok) anyOk = true;
-    }
+  // Fire EVERY order at its panel in PARALLEL — fully instant, all in the same
+  // second (different services like/love/care/share on one link go together).
+  // Most panels accept many DIFFERENT services on one link at once. In the rare
+  // case a panel returns "active order with this link", submitOne retries that
+  // one order in-line (a few short attempts) until it's accepted — so it still
+  // lands quickly and nothing is missing, without slowing the others down.
+  await mapLimit(orders, 50, async (order) => {
+    const ok = await submitOne(order);
+    if (ok) anyOk = true;
   });
 
   console.log(`[submit] ${orders.length} order(s) sent in ${Date.now() - t0}ms total`);

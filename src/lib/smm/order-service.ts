@@ -237,11 +237,11 @@ export async function executeAutoBoost(input: AutoBoostInput, userId: string) {
       status: "PENDING" as const,
       providerOrderId: null,
       submitAttempts: 0,
-      // Give the instant submit below the first shot — hold the background
-      // scheduler off for 15s so it doesn't race and claim these same orders
-      // (which caused some to be silently skipped). If instant submit fails, it
-      // rolls back with a sooner nextRetryAt and the scheduler picks it up.
-      nextRetryAt: new Date(Date.now() + 15_000),
+      // The instant submit below + its in-line retry loop handle these. Set a
+      // small scheduler delay (8s) as a SAFETY NET: if the whole process were to
+      // restart mid-submit, the scheduler still picks the order up — nothing is
+      // ever lost. (The instant submit normally finishes well before this.)
+      nextRetryAt: new Date(Date.now() + 8_000),
       panelId: j.alloc.panelId,
       serviceId: j.alloc.serviceId,
       userId,

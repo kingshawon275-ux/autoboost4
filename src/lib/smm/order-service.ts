@@ -683,9 +683,12 @@ async function commitSuccess(order: SubmittableOrder, providerOrder: string): Pr
   // leaving the order stuck PROCESSING with no provider id.
   let saved = false;
   try {
+    // updateMany (not update) avoids Prisma's implicit read-modify transaction,
+    // so it's a single lightweight write that doesn't deadlock against the bulk
+    // insert / other orders. Retry hard just in case.
     await withRetry(
       () =>
-        prisma.order.update({
+        prisma.order.updateMany({
           where: { id: order.id },
           data: { status: "PROCESSING", providerOrderId: providerOrder, nextRetryAt: null, errorMessage: null },
         }),

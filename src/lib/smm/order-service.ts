@@ -330,7 +330,18 @@ async function submitOrdersByIds(ids: string[]) {
     );
 
     if (res.ok && res.data?.order) {
-      await commitSuccess(order, String(res.data.order));
+      let saved = await commitSuccess(order, String(res.data.order));
+      if (!saved) {
+        console.log(
+          `[submit] ${order.panel.name} ${order.boostType} -> panel OK #${res.data.order} but DB save failed; retrying save`,
+        );
+        // The panel accepted it (don't resend = avoid duplicate). Keep retrying
+        // ONLY the DB write until the provider id is recorded.
+        for (let i = 0; i < 20 && !saved; i++) {
+          await new Promise((r) => setTimeout(r, 1000 + i * 500));
+          saved = await commitSuccess(order, String(res.data.order));
+        }
+      }
       return true;
     } else if (isActiveOrderError(res.error)) {
       // The panel still has an active order on this link. Retry RIGHT HERE a few
@@ -539,7 +550,11 @@ export async function submitPendingOrders(limit = 200) {
       });
 
       if (res.ok && res.data?.order) {
-        await commitSuccess(order, String(res.data.order));
+        let saved = await commitSuccess(order, String(res.data.order));
+        for (let i = 0; i < 20 && !saved; i++) {
+          await new Promise((r) => setTimeout(r, 1000 + i * 500));
+          saved = await commitSuccess(order, String(res.data.order));
+        }
         ok++;
         return;
       }
@@ -661,45 +676,53 @@ type SubmittableOrder = {
  * the 3 other orders hitting the same panel, the order still stays PROCESSING
  * and the balance is corrected by the next balance sync.
  */
-async function commitSuccess(order: SubmittableOrder, providerOrder: string) {
-  // 1) The ESSENTIAL write — the order MUST record its providerOrderId, or it
-  // looks unsent (and could be resent = duplicate, or stay stuck PROCESSING).
-  // Retry hard (15x) so a transient DB write-conflict can never lose it.
-  await withRetry(
-    () =>
-      prisma.order.update({
-        where: { id: order.id },
-        data: { status: "PROCESSING", providerOrderId: providerOrder, nextRetryAt: null, errorMessage: null },
+async function commitSuccess(order: SubmittableOrder, providerOrder: string): Promise<boolean> {
+  // The ONE essential write — record the provider order id. Retry hard (20x).
+  // CRUCIALLY this never throws: if it still can't write, we return false and
+  // the caller leaves the order to be retried, instead of it bubbling up and
+  // leaving the order stuck PROCESSING with no provider id.
+  let saved = false;
+  try {
+    await withRetry(
+      () =>
+        prisma.order.update({
+          where: { id: order.id },
+          data: { status: "PROCESSING", providerOrderId: providerOrder, nextRetryAt: null, errorMessage: null },
+        }),
+      20,
+    );
+    saved = true;
+  } catch {
+    saved = false;
+  }
+
+  // Bookkeeping (log + transaction) is fire-and-forget background work — it must
+  // never block or fail the order. Running it detached also keeps it from
+  // contending with the essential write above.
+  void (async () => {
+    await withRetry(() =>
+      prisma.orderLog.create({
+        data: { orderId: order.id, status: "PROCESSING", message: `Submitted (provider #${providerOrder})` },
       }),
-    15,
-  );
+    ).catch(() => {});
+    await withRetry(() =>
+      prisma.transaction.create({
+        data: {
+          type: "ORDER",
+          amount: order.cost,
+          currency: order.panel?.currency ?? "USD",
+          userId: order.userId,
+          orderId: order.id,
+          panelId: order.panelId,
+          note: `${order.boostType} x${order.quantity}`,
+        },
+      }),
+    ).catch(() => {});
+  })();
 
-  // 2) Bookkeeping — best-effort, each isolated so one conflict can't undo another.
-  await withRetry(() =>
-    prisma.orderLog.create({
-      data: { orderId: order.id, status: "PROCESSING", message: `Submitted (provider #${providerOrder})` },
-    }),
-  ).catch(() => {});
-
-  await withRetry(() =>
-    prisma.transaction.create({
-      data: {
-        type: "ORDER",
-        amount: order.cost,
-        currency: order.panel?.currency ?? "USD",
-        userId: order.userId,
-        orderId: order.id,
-        panelId: order.panelId,
-        note: `${order.boostType} x${order.quantity}`,
-      },
-    }),
-  ).catch(() => {});
-
-  // NOTE: we intentionally do NOT decrement the panel balance here. When many
-  // orders hit the SAME panel at once, every order updating that one panel
-  // document caused MongoDB write-conflict/deadlocks. The balance is refreshed
-  // from the provider by the periodic balance sync instead, which is accurate
-  // and never conflicts.
+  // Balance is NOT decremented here — many orders on one panel caused deadlocks.
+  // The periodic balance sync pulls the accurate value from the provider.
+  return saved;
 }
 
 

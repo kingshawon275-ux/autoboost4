@@ -231,10 +231,12 @@ export async function executeAutoBoost(input: AutoBoostInput, userId: string) {
 
   if (!jobs.length) return { batchId, plan, orders: [] };
 
-  // 1) Save ALL orders instantly as PENDING (one bulk insert). This never times
-  // out no matter how many orders — submission happens in the background.
+  // 1) Save ALL orders instantly as PENDING (one bulk insert). withRetry guards
+  // against a transient write-conflict if two users submit at the same instant,
+  // so the save never fails and the request stays fast.
   const ids = jobs.map(() => randomBytes(12).toString("hex"));
-  await prisma.order.createMany({
+  await withRetry(() =>
+    prisma.order.createMany({
     data: jobs.map((j, i) => ({
       id: ids[i],
       batchId,
@@ -257,7 +259,8 @@ export async function executeAutoBoost(input: AutoBoostInput, userId: string) {
       serviceId: j.alloc.serviceId,
       userId,
     })),
-  });
+    }),
+  );
 
   // Orders are saved → tell clients to refresh instantly.
   emitUpdate("orders", "dashboard");

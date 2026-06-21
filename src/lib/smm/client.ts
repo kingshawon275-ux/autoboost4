@@ -52,32 +52,6 @@ export interface SmmCallResult<T> {
   raw?: unknown;
 }
 
-// A shared keep-alive connection pool. Reusing TCP+TLS connections to each
-// panel removes the per-request handshake (the main reason every call took
-// ~10s on the VPS) and keeps many DNS-resolved sockets warm. Created lazily so
-// it never breaks environments without undici.
-let sharedDispatcher: unknown;
-async function getDispatcher(): Promise<unknown> {
-  if (sharedDispatcher !== undefined) return sharedDispatcher;
-  try {
-    // undici ships with Node but has no bundled types here; import dynamically
-    // by a computed name so TypeScript doesn't try to resolve it.
-    const mod = (await import(/* webpackIgnore: true */ "undici" as string)) as {
-      Agent: new (opts: Record<string, unknown>) => unknown;
-    };
-    sharedDispatcher = new mod.Agent({
-      keepAliveTimeout: 5 * 60_000, // keep idle sockets warm for 5 min
-      keepAliveMaxTimeout: 10 * 60_000,
-      connections: 64, // per origin
-      pipelining: 1,
-      connect: { timeout: 15_000 },
-    });
-  } catch {
-    sharedDispatcher = null; // undici not available → plain fetch
-  }
-  return sharedDispatcher;
-}
-
 export class SmmClient {
   constructor(
     private readonly apiUrl: string,
@@ -98,21 +72,16 @@ export class SmmClient {
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const dispatcher = await getDispatcher();
-      // `dispatcher` is an undici-specific fetch option not in the DOM types.
-      const fetchInit: RequestInit & { dispatcher?: unknown } = {
+      // Plain fetch — Node's built-in global agent already keeps connections
+      // alive. (A custom undici Agent here turned out to slow things down on the
+      // VPS, so we keep this simple and fast, exactly as it worked before.)
+      const res = await fetch(this.apiUrl, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          // Be explicit so panels keep the socket open for reuse.
-          Connection: "keep-alive",
-        },
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body,
         signal: controller.signal,
         cache: "no-store",
-      };
-      if (dispatcher) fetchInit.dispatcher = dispatcher;
-      const res = await fetch(this.apiUrl, fetchInit);
+      });
       const durationMs = Date.now() - started;
       const text = await res.text();
       let data: unknown = null;

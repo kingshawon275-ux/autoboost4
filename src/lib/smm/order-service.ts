@@ -400,18 +400,41 @@ async function submitOrdersByIds(ids: string[]) {
   if (anyOk) emitUpdate("orders", "dashboard", "panels");
 
   // GUARANTEE no order is left behind. After the first pass, re-check THESE ids
-  // for any still PENDING (rolled back by a transient error / active-order) and
-  // resend them right here — up to a few rounds — so we never depend on a later
-  // scheduler tick and nothing silently goes missing.
-  for (let round = 0; round < 8; round++) {
-    const leftover = await prisma.order.findMany({
-      where: { id: { in: ids }, status: "PENDING", providerOrderId: null },
+  // for any that haven't reached the panel yet — this includes orders still
+  // PENDING (rolled back) AND orders stuck PROCESSING with NO providerOrderId
+  // (claimed, but the success-write hit a transient DB conflict). We reset those
+  // back to PENDING and resend, up to several rounds, so nothing is left behind.
+  for (let round = 0; round < 10; round++) {
+    const leftoverRaw = await prisma.order.findMany({
+      where: {
+        id: { in: ids },
+        providerOrderId: null,
+        status: { in: ["PENDING", "PROCESSING"] },
+      },
       include: { panel: true },
     });
-    if (leftover.length === 0) break;
-    console.log(`[submit] round ${round + 2}: resending ${leftover.length} leftover order(s)`);
-    await new Promise((r) => setTimeout(r, 4000));
-    await mapLimit(leftover, 50, async (order) => {
+    if (leftoverRaw.length === 0) break;
+
+    // Reset any stuck PROCESSING (no provider id) back to PENDING so the claim
+    // guard in submitOne works for them again.
+    const stuckIds = leftoverRaw.filter((o) => o.status === "PROCESSING").map((o) => o.id);
+    if (stuckIds.length) {
+      await prisma.order
+        .updateMany({
+          where: { id: { in: stuckIds }, status: "PROCESSING", providerOrderId: null },
+          data: { status: "PENDING" },
+        })
+        .catch(() => {});
+    }
+
+    console.log(`[submit] round ${round + 2}: resending ${leftoverRaw.length} leftover order(s)`);
+    await new Promise((r) => setTimeout(r, 3000));
+    // Re-fetch fresh so statuses are current after the reset above.
+    const toSend = await prisma.order.findMany({
+      where: { id: { in: leftoverRaw.map((o) => o.id) }, status: "PENDING", providerOrderId: null },
+      include: { panel: true },
+    });
+    await mapLimit(toSend, 50, async (order) => {
       const ok = await submitOne(order);
       if (ok) anyOk = true;
     });
@@ -419,7 +442,7 @@ async function submitOrdersByIds(ids: string[]) {
   }
 
   const stillPending = await prisma.order.count({
-    where: { id: { in: ids }, status: "PENDING", providerOrderId: null },
+    where: { id: { in: ids }, providerOrderId: null, status: { in: ["PENDING", "PROCESSING"] } },
   });
   console.log(
     `[submit] ${orders.length} order(s) done in ${Date.now() - t0}ms` +
@@ -449,7 +472,9 @@ export async function submitPendingOrders(limit = 200) {
     // (e.g. the process restarted mid-submit) — otherwise such an order would be
     // stuck forever and look like "it never went to the panel". We recover any
     // PROCESSING+no-provider order older than 30s back into the retry flow.
-    const ghostCutoff = new Date(now - 30_000);
+    // Recover orders stuck PROCESSING with no providerOrderId after 12s (claimed
+    // but the success-write failed). Kept short so nothing lingers unsent.
+    const ghostCutoff = new Date(now - 12_000);
     const [pendingRaw, ghosts] = await Promise.all([
       prisma.order.findMany({
         where: { status: "PENDING" },
@@ -637,14 +662,16 @@ type SubmittableOrder = {
  * and the balance is corrected by the next balance sync.
  */
 async function commitSuccess(order: SubmittableOrder, providerOrder: string) {
-  // 1) The ESSENTIAL write — the order must record its providerOrderId, or it
-  // looks unsent (and a ghost-recovery could resend it = duplicate). This is a
-  // single-document update, so it never deadlocks against other orders.
-  await withRetry(() =>
-    prisma.order.update({
-      where: { id: order.id },
-      data: { status: "PROCESSING", providerOrderId: providerOrder, nextRetryAt: null, errorMessage: null },
-    }),
+  // 1) The ESSENTIAL write — the order MUST record its providerOrderId, or it
+  // looks unsent (and could be resent = duplicate, or stay stuck PROCESSING).
+  // Retry hard (15x) so a transient DB write-conflict can never lose it.
+  await withRetry(
+    () =>
+      prisma.order.update({
+        where: { id: order.id },
+        data: { status: "PROCESSING", providerOrderId: providerOrder, nextRetryAt: null, errorMessage: null },
+      }),
+    15,
   );
 
   // 2) Bookkeeping — best-effort, each isolated so one conflict can't undo another.

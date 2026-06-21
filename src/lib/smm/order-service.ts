@@ -451,14 +451,16 @@ function isPermanentError(error?: string | null): boolean {
 }
 
 async function markFailed(orderId: string, message: string) {
+  // No $transaction (avoids write-conflict/deadlocks). Status is the essential
+  // write; the log is detached best-effort.
+  void withRetry(() =>
+    prisma.orderLog.create({ data: { orderId, status: "FAILED", message } }),
+  ).catch(() => {});
   await withRetry(() =>
-    prisma.$transaction([
-      prisma.order.update({
-        where: { id: orderId },
-        data: { status: "FAILED", errorMessage: message },
-      }),
-      prisma.orderLog.create({ data: { orderId, status: "FAILED", message } }),
-    ]),
+    prisma.order.updateMany({
+      where: { id: orderId },
+      data: { status: "FAILED", errorMessage: message },
+    }),
   ).catch(() => {});
 }
 
@@ -591,19 +593,21 @@ export async function refreshOrderStatuses(limit = 120) {
       // When an order is progressing/done, clear any stale error message so the
       // UI doesn't show old "Retrying…" text under a Completed order.
       const clearError = status !== "FAILED";
+      // No $transaction (it caused write-conflict/deadlocks when many ran at
+      // once). The status update is the essential write; the log is detached.
+      void withRetry(() =>
+        prisma.orderLog.create({ data: { orderId: order.id, status, message: `Status: ${providerStatus}` } }),
+      ).catch(() => {});
       return withRetry(() =>
-        prisma.$transaction([
-          prisma.order.update({
-            where: { id: order.id },
-            data: {
-              status,
-              remains: isNaN(remains) ? order.remains : remains,
-              startCount: isNaN(startCount) ? order.startCount : startCount,
-              ...(clearError ? { errorMessage: null } : {}),
-            },
-          }),
-          prisma.orderLog.create({ data: { orderId: order.id, status, message: `Status: ${providerStatus}` } }),
-        ]),
+        prisma.order.updateMany({
+          where: { id: order.id },
+          data: {
+            status,
+            remains: isNaN(remains) ? order.remains : remains,
+            startCount: isNaN(startCount) ? order.startCount : startCount,
+            ...(clearError ? { errorMessage: null } : {}),
+          },
+        }),
       ).catch(() => {});
     }),
   );

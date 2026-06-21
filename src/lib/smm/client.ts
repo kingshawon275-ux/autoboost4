@@ -72,9 +72,6 @@ export class SmmClient {
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      // Plain fetch — Node's built-in global agent already keeps connections
-      // alive. (A custom undici Agent here turned out to slow things down on the
-      // VPS, so we keep this simple and fast, exactly as it worked before.)
       const res = await fetch(this.apiUrl, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -145,17 +142,15 @@ export class SmmClient {
     if (opts.interval) params.interval = opts.interval;
 
     // Retry transient network errors (fetch failed / timeout / 5xx) up to 3x.
-    // A real provider rejection (error in JSON) is NOT retried. Use a shorter
-    // per-attempt timeout so a single slow panel can't stall submission for
-    // 30s; transient failures fall back to the background retry queue anyway.
+    // A real provider rejection (error in JSON) is NOT retried.
     let last: SmmCallResult<SmmAddResponse> | null = null;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const res = await this.call<SmmAddResponse>(params, 15000);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res = await this.call<SmmAddResponse>(params, 30000);
       // Success, or a definite provider rejection → return immediately.
       if (res.ok || (res.status >= 400 && res.status < 500 && res.data)) return res;
       last = res;
-      // transient (status 0 = network/timeout, or 5xx) → brief wait and retry
-      await new Promise((r) => setTimeout(r, 300));
+      // transient (status 0 = network/timeout, or 5xx) → wait and retry
+      await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
     }
     return last as SmmCallResult<SmmAddResponse>;
   }

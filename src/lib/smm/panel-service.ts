@@ -2,7 +2,6 @@ import { prisma } from "@/lib/prisma";
 import { SmmClient, type SmmService } from "@/lib/smm/client";
 import { withRetry } from "@/lib/db-retry";
 import { emitUpdate } from "@/lib/realtime";
-import { mapLimit } from "@/lib/concurrency";
 
 async function logApi(opts: {
   panelId?: string;
@@ -244,47 +243,21 @@ export async function syncServices(panelId: string) {
   return { ok: true, count, skipped, received: services.length };
 }
 
-/**
- * Lightweight warm-up: open/keep a keep-alive connection to every panel by
- * making a cheap balance call. Doesn't write status (so it won't flap a panel
- * to ERROR on a single slow ping) — its only job is to keep the TCP+TLS socket
- * hot so a real order goes out in ~1s instead of paying a cold connection.
- */
-export async function warmPanelConnections() {
-  const panels = await prisma.panel.findMany({
-    where: { enabled: true },
-    select: { apiUrl: true, apiKey: true },
-  });
-  let warmed = 0;
-  await mapLimit(panels, 10, async (p) => {
-    try {
-      const client = new SmmClient(p.apiUrl, p.apiKey);
-      const res = await client.balance();
-      if (res.ok) warmed++;
-    } catch {
-      /* ignore — warming is best-effort */
-    }
-  });
-  return { panels: panels.length, warmed };
-}
-
 /** Sync balance for every enabled panel. Used by the background scheduler. */
 export async function syncAllBalances() {
   const panels = await prisma.panel.findMany({
     where: { enabled: true },
     select: { id: true },
   });
-  // Run all panels in parallel (bounded) so total time ≈ the slowest single
-  // panel, not the sum of all of them. With keep-alive this is much faster.
   let ok = 0;
-  await mapLimit(panels, 10, async (p) => {
+  for (const p of panels) {
     try {
       const res = await syncBalance(p.id);
       if (res.ok) ok++;
     } catch {
       /* keep going on per-panel failure */
     }
-  });
+  }
   return { panels: panels.length, ok };
 }
 
@@ -294,17 +267,14 @@ export async function syncAllServices() {
     where: { enabled: true },
     select: { id: true },
   });
-  // Parallel but limited — catalogues can be huge (tens of thousands), so keep
-  // concurrency modest to avoid spiking memory while still being far faster
-  // than syncing panels one-by-one.
   let total = 0;
-  await mapLimit(panels, 3, async (p) => {
+  for (const p of panels) {
     try {
       const res = await syncServices(p.id);
       if (res.ok) total += res.count;
     } catch {
       /* keep going on per-panel failure */
     }
-  });
+  }
   return { panels: panels.length, services: total };
 }

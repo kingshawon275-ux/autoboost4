@@ -76,10 +76,7 @@ async function candidatesFor(
 
   const candidates: PanelCandidate[] = [];
   for (const m of mappings) {
-    // Only skip explicitly-disabled panels. A panel showing "ERROR" (a
-    // transient balance/sync hiccup) can still accept orders, so we DON'T skip
-    // it here — otherwise services silently go missing.
-    if (!m.panel.enabled) continue;
+    if (!m.panel.enabled || m.panel.status === "DISABLED") continue;
     candidates.push({
       panelId: m.panelId,
       panelName: m.panel.name,
@@ -172,20 +169,9 @@ export async function planAutoBoost(input: AutoBoostInput): Promise<BoostPlan> {
         } else {
           qty = baseQuantity;
         }
-        // Clamp the quantity to the panel service's min/max so the panel never
-        // rejects the order with "Quantity less than minimal" / "more than max"
-        // (which was making orders go missing). We bump up to min / down to max
-        // and just note it, so every selected service actually goes through.
-        // (Custom comments can't be clamped — their count is fixed.)
-        if (!customComments && c.min && qty < c.min) {
-          warnings.push(`${c.panelName}: raised ${boostType} to min ${c.min} (was ${qty}).`);
-          qty = c.min;
-        }
-        if (!customComments && c.max && qty > c.max) {
-          warnings.push(`${c.panelName}: lowered ${boostType} to max ${c.max} (was ${qty}).`);
-          qty = c.max;
-        }
         const estCost = +(qty * (c.ratePer1000 / 1000)).toFixed(4);
+        if (qty < c.min) warnings.push(`${c.panelName}: ${qty} is below min ${c.min} for ${boostType}`);
+        if (qty > c.max) warnings.push(`${c.panelName}: ${qty} exceeds max ${c.max} for ${boostType}`);
         return {
           panelId: c.panelId,
           panelName: c.panelName,
@@ -220,23 +206,12 @@ export async function executeAutoBoost(input: AutoBoostInput, userId: string) {
   for (const item of plan.items) {
     for (const alloc of item.allocations) jobs.push({ boostType: item.boostType, alloc });
   }
-
-  // Visibility: log exactly what was planned so any "missing service" is obvious
-  // in pm2 logs (which boost on which panel, and any warnings that dropped one).
-  console.log(
-    `[plan] ${input.boosts.length} boost(s) x ${input.panelIds.length} panel(s) selected -> ${jobs.length} order(s):`,
-    jobs.map((j) => `${j.alloc.panelName}/${j.boostType}`).join(", ") || "(none)",
-  );
-  if (plan.warnings.length) console.log(`[plan] warnings: ${plan.warnings.join(" | ")}`);
-
   if (!jobs.length) return { batchId, plan, orders: [] };
 
-  // 1) Save ALL orders instantly as PENDING (one bulk insert). withRetry guards
-  // against a transient write-conflict if two users submit at the same instant,
-  // so the save never fails and the request stays fast.
+  // 1) Save ALL orders instantly as PENDING (one bulk insert). This never times
+  // out no matter how many orders — submission happens in the background.
   const ids = jobs.map(() => randomBytes(12).toString("hex"));
-  await withRetry(() =>
-    prisma.order.createMany({
+  await prisma.order.createMany({
     data: jobs.map((j, i) => ({
       id: ids[i],
       batchId,
@@ -250,17 +225,12 @@ export async function executeAutoBoost(input: AutoBoostInput, userId: string) {
       status: "PENDING" as const,
       providerOrderId: null,
       submitAttempts: 0,
-      // The instant submit below + its in-line retry loop handle these. Set a
-      // small scheduler delay (8s) as a SAFETY NET: if the whole process were to
-      // restart mid-submit, the scheduler still picks the order up — nothing is
-      // ever lost. (The instant submit normally finishes well before this.)
-      nextRetryAt: new Date(Date.now() + 8_000),
+      nextRetryAt: new Date(), // ready to submit now
       panelId: j.alloc.panelId,
       serviceId: j.alloc.serviceId,
       userId,
     })),
-    }),
-  );
+  });
 
   // Orders are saved → tell clients to refresh instantly.
   emitUpdate("orders", "dashboard");
@@ -287,7 +257,6 @@ export async function executeAutoBoost(input: AutoBoostInput, userId: string) {
  */
 async function submitOrdersByIds(ids: string[]) {
   if (!ids.length) return;
-  const t0 = Date.now();
   const orders = await prisma.order.findMany({
     where: { id: { in: ids } },
     include: { panel: true },
@@ -302,166 +271,48 @@ async function submitOrdersByIds(ids: string[]) {
       await markFailed(order.id, "Missing panel/service");
       return false;
     }
-
-    // CLAIM the order atomically before sending it to the panel. updateMany only
-    // flips it if it's still PENDING with no provider id, so if the background
-    // scheduler (or another run) already grabbed it, claimed.count === 0 and we
-    // skip — this prevents the SAME order being sent to the panel twice (the
-    // duplicate-order bug). We mark it PROCESSING up-front; commitSuccess sets
-    // the real providerOrderId, or we roll back to PENDING on a transient fail.
-    const claimed = await prisma.order.updateMany({
-      where: { id: order.id, status: "PENDING", providerOrderId: null },
-      data: { status: "PROCESSING" },
-    });
-    if (claimed.count === 0) {
-      console.log(`[submit] skip ${order.panel.name}/${order.boostType} (already claimed)`);
-      return false; // someone else is sending it
-    }
-
     const client = new SmmClient(order.panel.apiUrl, order.panel.apiKey);
-    const callStart = Date.now();
     const res = await client.addOrder({
       service: order.serviceId,
       link: order.postUrl,
       quantity: order.quantity,
       comments: order.comments ?? undefined,
     });
-    console.log(
-      `[submit] ${order.panel.name} ${order.boostType} (svc ${order.serviceId}) -> ${
-        res.ok ? `OK #${res.data?.order ?? "?"}` : res.error?.slice(0, 50)
-      } in ${Date.now() - callStart}ms`,
-    );
 
     if (res.ok && res.data?.order) {
-      let saved = await commitSuccess(order, String(res.data.order));
-      if (!saved) {
-        console.log(
-          `[submit] ${order.panel.name} ${order.boostType} -> panel OK #${res.data.order} but DB save failed; retrying save`,
-        );
-        // The panel accepted it (don't resend = avoid duplicate). Keep retrying
-        // ONLY the DB write until the provider id is recorded.
-        for (let i = 0; i < 20 && !saved; i++) {
-          await new Promise((r) => setTimeout(r, 1000 + i * 500));
-          saved = await commitSuccess(order, String(res.data.order));
-        }
-      }
+      await commitSuccess(order, String(res.data.order));
       return true;
-    } else if (isActiveOrderError(res.error)) {
-      // The panel still has an active order on this link. Retry RIGHT HERE a few
-      // times (short waits) so the service lands now, instead of relying on a
-      // later scheduler pass. Keep it PROCESSING (claimed) so nothing else grabs
-      // it; only roll back to PENDING if we exhaust the in-line retries.
-      for (let attempt = 0; attempt < 6; attempt++) {
-        await new Promise((r) => setTimeout(r, 2500));
-        const retryRes = await client.addOrder({
-          service: order.serviceId,
-          link: order.postUrl,
-          quantity: order.quantity,
-          comments: order.comments ?? undefined,
-        });
-        if (retryRes.ok && retryRes.data?.order) {
-          console.log(`[submit] ${order.panel.name} ${order.boostType} -> OK (retry ${attempt + 1})`);
-          await commitSuccess(order, String(retryRes.data.order));
-          return true;
-        }
-        if (isPermanentError(retryRes.error)) {
-          await markFailed(order.id, retryRes.error ?? "Provider rejected order");
-          return false;
-        }
-        if (!isActiveOrderError(retryRes.error)) break; // different error → fall through
-      }
-      // Still blocked → hand to the background queue (PENDING, soon).
-      await prisma.order
-        .update({
-          where: { id: order.id },
-          data: { status: "PENDING", nextRetryAt: new Date(Date.now() + 3_000), errorMessage: "Resending…" },
-        })
-        .catch(() => {});
-      console.log(`[submit] ${order.panel.name} ${order.boostType} -> still active, queued`);
-      return false;
     } else if (isPermanentError(res.error)) {
       // Hard rejection (balance / invalid link…) → fail now.
       await markFailed(order.id, res.error ?? "Provider rejected order");
       return false;
     } else {
-      // Network/transient → roll back to PENDING for a quick retry.
+      // Temporary (active-order / network) → retry via background queue.
+      const wait = isActiveOrderError(res.error) ? 60_000 : 5_000;
       await prisma.order
         .update({
           where: { id: order.id },
           data: {
-            status: "PENDING",
-            nextRetryAt: new Date(Date.now() + 3_000),
-            errorMessage: "Resending…",
+            nextRetryAt: new Date(Date.now() + wait),
+            errorMessage: "Waiting for the previous order on this link…",
           },
         })
         .catch(() => {});
-      console.log(`[submit] ${order.panel.name} ${order.boostType} -> ${res.error?.slice(0, 30)}, queued`);
       return false;
     }
   };
 
-  // Fire EVERY order at its panel in PARALLEL — fully instant, all in the same
-  // second (different services like/love/care/share on one link go together).
-  // Most panels accept many DIFFERENT services on one link at once. In the rare
-  // case a panel returns "active order with this link", submitOne retries that
-  // one order in-line (a few short attempts) until it's accepted — so it still
-  // lands quickly and nothing is missing, without slowing the others down.
-  await mapLimit(orders, 50, async (order) => {
+  // Submit everything in PARALLEL for maximum speed — most panels accept many
+  // services on the same link at once (no collision). If a panel ever returns
+  // "You have active order with this link", that order is simply retried by the
+  // background queue (isActiveOrderError) instead of failing — so it's never
+  // lost and every other order still goes out at full speed.
+  await mapLimit(orders, 25, async (order) => {
     const ok = await submitOne(order);
     if (ok) anyOk = true;
   });
 
   if (anyOk) emitUpdate("orders", "dashboard", "panels");
-
-  // GUARANTEE no order is left behind. After the first pass, re-check THESE ids
-  // for any that haven't reached the panel yet — this includes orders still
-  // PENDING (rolled back) AND orders stuck PROCESSING with NO providerOrderId
-  // (claimed, but the success-write hit a transient DB conflict). We reset those
-  // back to PENDING and resend, up to several rounds, so nothing is left behind.
-  for (let round = 0; round < 10; round++) {
-    const leftoverRaw = await prisma.order.findMany({
-      where: {
-        id: { in: ids },
-        providerOrderId: null,
-        status: { in: ["PENDING", "PROCESSING"] },
-      },
-      include: { panel: true },
-    });
-    if (leftoverRaw.length === 0) break;
-
-    // Reset any stuck PROCESSING (no provider id) back to PENDING so the claim
-    // guard in submitOne works for them again.
-    const stuckIds = leftoverRaw.filter((o) => o.status === "PROCESSING").map((o) => o.id);
-    if (stuckIds.length) {
-      await prisma.order
-        .updateMany({
-          where: { id: { in: stuckIds }, status: "PROCESSING", providerOrderId: null },
-          data: { status: "PENDING" },
-        })
-        .catch(() => {});
-    }
-
-    console.log(`[submit] round ${round + 2}: resending ${leftoverRaw.length} leftover order(s)`);
-    await new Promise((r) => setTimeout(r, 3000));
-    // Re-fetch fresh so statuses are current after the reset above.
-    const toSend = await prisma.order.findMany({
-      where: { id: { in: leftoverRaw.map((o) => o.id) }, status: "PENDING", providerOrderId: null },
-      include: { panel: true },
-    });
-    await mapLimit(toSend, 50, async (order) => {
-      const ok = await submitOne(order);
-      if (ok) anyOk = true;
-    });
-    if (anyOk) emitUpdate("orders", "dashboard", "panels");
-  }
-
-  const stillPending = await prisma.order.count({
-    where: { id: { in: ids }, providerOrderId: null, status: { in: ["PENDING", "PROCESSING"] } },
-  });
-  console.log(
-    `[submit] ${orders.length} order(s) done in ${Date.now() - t0}ms` +
-      (stillPending ? ` — ${stillPending} still queued for the scheduler` : " — all sent"),
-  );
 }
 
 // Prevent overlapping background runs in the same process.
@@ -481,43 +332,14 @@ export async function submitPendingOrders(limit = 200) {
   submitting = true;
   try {
     const now = Date.now();
-    // Fetch orders that still need submitting. This includes PENDING orders AND
-    // "ghost" PROCESSING orders that were claimed but never got a providerOrderId
-    // (e.g. the process restarted mid-submit) — otherwise such an order would be
-    // stuck forever and look like "it never went to the panel". We recover any
-    // PROCESSING+no-provider order older than 30s back into the retry flow.
-    // Recover orders stuck PROCESSING with no providerOrderId after 12s (claimed
-    // but the success-write failed). Kept short so nothing lingers unsent.
-    const ghostCutoff = new Date(now - 12_000);
-    const [pendingRaw, ghosts] = await Promise.all([
-      prisma.order.findMany({
-        where: { status: "PENDING" },
-        include: { panel: true },
-        take: limit,
-        orderBy: { createdAt: "asc" },
-      }),
-      prisma.order.findMany({
-        where: { status: "PROCESSING", updatedAt: { lt: ghostCutoff } },
-        include: { panel: true },
-        take: limit,
-        orderBy: { createdAt: "asc" },
-      }),
-    ]);
-    // Reset ghosts to PENDING so the claim-guard works for them again.
-    const ghostIds = ghosts.filter((o) => !o.providerOrderId).map((o) => o.id);
-    if (ghostIds.length) {
-      await prisma.order
-        .updateMany({
-          where: { id: { in: ghostIds }, status: "PROCESSING", providerOrderId: null },
-          data: { status: "PENDING", nextRetryAt: new Date() },
-        })
-        .catch(() => {});
-    }
-    const ghostSet = new Set(ghostIds);
-    const due = [
-      ...pendingRaw,
-      ...ghosts.filter((o) => ghostSet.has(o.id)).map((o) => ({ ...o, status: "PENDING" as const })),
-    ];
+    // Fetch PENDING orders; filter "due for retry" in JS so the query doesn't
+    // depend on the nextRetryAt column existing (robust across schema versions).
+    const due = await prisma.order.findMany({
+      where: { status: "PENDING" },
+      include: { panel: true },
+      take: limit,
+      orderBy: { createdAt: "asc" },
+    });
     const pending = due.filter((o) => {
       if (o.providerOrderId) return false; // already submitted
       const next = o.nextRetryAt ? new Date(o.nextRetryAt).getTime() : 0;
@@ -535,15 +357,6 @@ export async function submitPendingOrders(limit = 200) {
         failed++;
         return;
       }
-
-      // Atomically claim before sending — prevents this order being submitted
-      // twice (e.g. by a concurrent instant-submit). Skip if already claimed.
-      const claimed = await prisma.order.updateMany({
-        where: { id: order.id, status: "PENDING", providerOrderId: null },
-        data: { status: "PROCESSING" },
-      });
-      if (claimed.count === 0) return;
-
       const client = new SmmClient(order.panel.apiUrl, order.panel.apiKey);
       const res = await client.addOrder({
         service: order.serviceId,
@@ -553,11 +366,7 @@ export async function submitPendingOrders(limit = 200) {
       });
 
       if (res.ok && res.data?.order) {
-        let saved = await commitSuccess(order, String(res.data.order));
-        for (let i = 0; i < 20 && !saved; i++) {
-          await new Promise((r) => setTimeout(r, 1000 + i * 500));
-          saved = await commitSuccess(order, String(res.data.order));
-        }
+        await commitSuccess(order, String(res.data.order));
         ok++;
         return;
       }
@@ -575,8 +384,7 @@ export async function submitPendingOrders(limit = 200) {
           .update({
             where: { id: order.id },
             data: {
-              // roll back to PENDING so it's retried; don't count as an attempt.
-              status: "PENDING",
+              // don't increment attempts — this isn't a failure, just a wait.
               nextRetryAt: new Date(Date.now() + 60_000),
               errorMessage: "Waiting for the previous order on this link…",
             },
@@ -589,7 +397,6 @@ export async function submitPendingOrders(limit = 200) {
           .update({
             where: { id: order.id },
             data: {
-              status: "PENDING", // roll back so the claim guard works next time
               submitAttempts: attempts,
               nextRetryAt: new Date(Date.now() + backoffMs),
               errorMessage: "Network issue, retrying…",
@@ -614,9 +421,9 @@ export async function submitPendingOrders(limit = 200) {
 // for the same link while one is in progress. This is TEMPORARY: once the first
 // order finishes, the next is accepted. So we RETRY these (with a longer wait),
 // not fail them.
-function isActiveOrderError(error?: unknown): boolean {
-  const e = String(error ?? "").toLowerCase();
-  if (!e) return false;
+function isActiveOrderError(error?: string | null): boolean {
+  if (!error) return false;
+  const e = error.toLowerCase();
   return (
     e.includes("active order") ||
     e.includes("already") ||
@@ -628,20 +435,18 @@ function isActiveOrderError(error?: unknown): boolean {
 }
 
 // Detect a PERMANENT provider rejection (retrying won't help) → fail
-// immediately. Covers balance, invalid link/service, and quantity/limit
-// problems (e.g. "Quantity less than minimal 50"). NOTE: "active order" is NOT
-// here — that's temporary (see isActiveOrderError).
-function isPermanentError(error?: unknown): boolean {
-  const e = String(error ?? "").toLowerCase();
-  if (!e) return false;
+// immediately. Covers balance, invalid link/service, limits. NOTE: "active
+// order" is NOT here — that's temporary (see isActiveOrderError).
+function isPermanentError(error?: string | null): boolean {
+  if (!error) return false;
+  const e = error.toLowerCase();
   const permanent = [
     // balance / funds
     "balance", "fund", "insufficient", "not enough", "top up", "top-up", "topup",
     // link / service problems
     "invalid", "incorrect", "not found", "wrong link", "wrong url", "no service",
-    // quantity / limit / format (covers "less than minimal", "min", "max", etc.)
-    "minimal", "minimum", "maximum", "less than", "more than", "quantity",
-    "min ", "max ", "out of range", "not divisible", "step",
+    // limits / format
+    "min ", "max ", "minimum", "maximum",
     // generic hard rejections
     "not allowed", "disabled", "unavailable", "closed", "blocked",
   ];
@@ -679,56 +484,42 @@ type SubmittableOrder = {
  * the 3 other orders hitting the same panel, the order still stays PROCESSING
  * and the balance is corrected by the next balance sync.
  */
-async function commitSuccess(order: SubmittableOrder, providerOrder: string): Promise<boolean> {
-  // The ONE essential write — record the provider order id. Retry hard (20x).
-  // CRUCIALLY this never throws: if it still can't write, we return false and
-  // the caller leaves the order to be retried, instead of it bubbling up and
-  // leaving the order stuck PROCESSING with no provider id.
-  let saved = false;
-  try {
-    // updateMany (not update) avoids Prisma's implicit read-modify transaction,
-    // so it's a single lightweight write that doesn't deadlock against the bulk
-    // insert / other orders. Retry hard just in case.
-    await withRetry(
-      () =>
-        prisma.order.updateMany({
-          where: { id: order.id },
-          data: { status: "PROCESSING", providerOrderId: providerOrder, nextRetryAt: null, errorMessage: null },
-        }),
-      20,
-    );
-    saved = true;
-  } catch {
-    saved = false;
-  }
+async function commitSuccess(order: SubmittableOrder, providerOrder: string) {
+  // 1) The essential write — never let this fail.
+  await withRetry(() =>
+    prisma.order.update({
+      where: { id: order.id },
+      data: { status: "PROCESSING", providerOrderId: providerOrder, nextRetryAt: null, errorMessage: null },
+    }),
+  );
 
-  // Bookkeeping (log + transaction) is fire-and-forget background work — it must
-  // never block or fail the order. Running it detached also keeps it from
-  // contending with the essential write above.
-  void (async () => {
-    await withRetry(() =>
-      prisma.orderLog.create({
-        data: { orderId: order.id, status: "PROCESSING", message: `Submitted (provider #${providerOrder})` },
-      }),
-    ).catch(() => {});
-    await withRetry(() =>
-      prisma.transaction.create({
-        data: {
-          type: "ORDER",
-          amount: order.cost,
-          currency: order.panel?.currency ?? "USD",
-          userId: order.userId,
-          orderId: order.id,
-          panelId: order.panelId,
-          note: `${order.boostType} x${order.quantity}`,
-        },
-      }),
-    ).catch(() => {});
-  })();
+  // 2) Bookkeeping — best-effort, each isolated so one conflict can't undo another.
+  await withRetry(() =>
+    prisma.orderLog.create({
+      data: { orderId: order.id, status: "PROCESSING", message: `Submitted (provider #${providerOrder})` },
+    }),
+  ).catch(() => {});
 
-  // Balance is NOT decremented here — many orders on one panel caused deadlocks.
-  // The periodic balance sync pulls the accurate value from the provider.
-  return saved;
+  await withRetry(() =>
+    prisma.transaction.create({
+      data: {
+        type: "ORDER",
+        amount: order.cost,
+        currency: order.panel?.currency ?? "USD",
+        userId: order.userId,
+        orderId: order.id,
+        panelId: order.panelId,
+        note: `${order.boostType} x${order.quantity}`,
+      },
+    }),
+  ).catch(() => {});
+
+  await withRetry(() =>
+    prisma.panel.update({
+      where: { id: order.panelId },
+      data: { balance: { decrement: order.cost } },
+    }),
+  ).catch(() => {});
 }
 
 

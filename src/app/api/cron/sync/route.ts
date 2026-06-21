@@ -1,6 +1,6 @@
 import { handle, ok, fail } from "@/lib/api";
-import { refreshOrderStatuses, submitPendingOrders } from "@/lib/smm/order-service";
-import { syncAllBalances, warmPanelConnections } from "@/lib/smm/panel-service";
+import { refreshOrderStatuses } from "@/lib/smm/order-service";
+import { syncAllBalances } from "@/lib/smm/panel-service";
 
 // Cron endpoint — submits pending orders, retries failures, syncs statuses.
 // Triggered automatically by Vercel Cron (see vercel.json) which sends
@@ -25,20 +25,6 @@ async function run(req: Request) {
 
     if (!secret || !(bearerOk || keyOk || isVercelCron)) {
       return fail("Unauthorized", 401);
-    }
-
-    // Fast path: just push due PENDING orders to their panels (no status sync).
-    // Called every 5s so a rolled-back/retried order is resent almost instantly.
-    if (url.searchParams.get("submitOnly") === "1") {
-      const submitted = await submitPendingOrders();
-      return ok({ ok: true, submitted });
-    }
-
-    // Warm-up: ping every panel (lightweight) to keep a keep-alive socket open,
-    // so real orders don't pay the cold DNS+TCP+TLS cost on a remote VPS.
-    if (url.searchParams.get("warmup") === "1") {
-      const warmed = await warmPanelConnections();
-      return ok({ ok: true, warmed });
     }
 
     // Refresh statuses (this also submits/retries pending orders first).

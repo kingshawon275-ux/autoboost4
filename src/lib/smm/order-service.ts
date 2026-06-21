@@ -321,37 +321,77 @@ async function submitOrdersByIds(ids: string[]) {
     if (res.ok && res.data?.order) {
       await commitSuccess(order, String(res.data.order));
       return true;
+    } else if (isActiveOrderError(res.error)) {
+      // The panel still has an active order on this link. Retry RIGHT HERE a few
+      // times (short waits) so the service lands now, instead of relying on a
+      // later scheduler pass. Keep it PROCESSING (claimed) so nothing else grabs
+      // it; only roll back to PENDING if we exhaust the in-line retries.
+      for (let attempt = 0; attempt < 6; attempt++) {
+        await new Promise((r) => setTimeout(r, 2500));
+        const retryRes = await client.addOrder({
+          service: order.serviceId,
+          link: order.postUrl,
+          quantity: order.quantity,
+          comments: order.comments ?? undefined,
+        });
+        if (retryRes.ok && retryRes.data?.order) {
+          console.log(`[submit] ${order.panel.name} ${order.boostType} -> OK (retry ${attempt + 1})`);
+          await commitSuccess(order, String(retryRes.data.order));
+          return true;
+        }
+        if (isPermanentError(retryRes.error)) {
+          await markFailed(order.id, retryRes.error ?? "Provider rejected order");
+          return false;
+        }
+        if (!isActiveOrderError(retryRes.error)) break; // different error → fall through
+      }
+      // Still blocked → hand to the background queue (PENDING, soon).
+      await prisma.order
+        .update({
+          where: { id: order.id },
+          data: { status: "PENDING", nextRetryAt: new Date(Date.now() + 3_000), errorMessage: "Resending…" },
+        })
+        .catch(() => {});
+      console.log(`[submit] ${order.panel.name} ${order.boostType} -> still active, queued`);
+      return false;
     } else if (isPermanentError(res.error)) {
       // Hard rejection (balance / invalid link…) → fail now.
       await markFailed(order.id, res.error ?? "Provider rejected order");
       return false;
     } else {
-      // Temporary (active-order / network) → roll back to PENDING and retry very
-      // soon (≈1.5s) so the service still lands on the post almost instantly,
-      // instead of waiting a full minute.
-      const wait = isActiveOrderError(res.error) ? 1_500 : 3_000;
+      // Network/transient → roll back to PENDING for a quick retry.
       await prisma.order
         .update({
           where: { id: order.id },
           data: {
             status: "PENDING",
-            nextRetryAt: new Date(Date.now() + wait),
+            nextRetryAt: new Date(Date.now() + 3_000),
             errorMessage: "Resending…",
           },
         })
         .catch(() => {});
+      console.log(`[submit] ${order.panel.name} ${order.boostType} -> ${res.error?.slice(0, 30)}, queued`);
       return false;
     }
   };
 
-  // Fire EVERY order at its panel in PARALLEL — fully instant, no waiting. Most
-  // panels accept many different services on the same link at once. If a panel
-  // does reject one with "active order with this link", submitOne rolls it back
-  // to PENDING with only a ~1.5s retry (not 60s), so it's resent almost
-  // immediately and still lands on the post within a couple of seconds.
-  await mapLimit(orders, 50, async (order) => {
-    const ok = await submitOne(order);
-    if (ok) anyOk = true;
+  // Group by panel+link: services on the SAME link via the SAME panel are sent
+  // SEQUENTIALLY (the panel rejects a 2nd order while one is active), while
+  // different panels/links run in PARALLEL. This avoids the active-order
+  // collision entirely so every service is accepted — nothing goes missing.
+  const groups = new Map<string, typeof orders>();
+  for (const o of orders) {
+    const key = `${o.panelId}::${o.postUrl}`;
+    const arr = groups.get(key);
+    if (arr) arr.push(o);
+    else groups.set(key, [o]);
+  }
+
+  await mapLimit([...groups.values()], 50, async (group) => {
+    for (const order of group) {
+      const ok = await submitOne(order);
+      if (ok) anyOk = true;
+    }
   });
 
   console.log(`[submit] ${orders.length} order(s) sent in ${Date.now() - t0}ms total`);

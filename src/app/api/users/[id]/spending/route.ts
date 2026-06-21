@@ -21,7 +21,10 @@ export async function GET(_req: Request, ctx: RouteContext<"/api/users/[id]/spen
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const page = await prisma.order.findMany({
-        where: { userId: id, status: { not: "FAILED" } },
+        // Only count orders that ACTUALLY reached the panel (have a provider
+        // order id). Orders that never went out were never charged, so they
+        // must not show as spend.
+        where: { userId: id, status: { not: "FAILED" }, providerOrderId: { not: null } },
         select: { id: true, cost: true, createdAt: true },
         orderBy: { id: "asc" },
         take: pageSize,

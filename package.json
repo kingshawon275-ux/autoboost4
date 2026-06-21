@@ -19,6 +19,8 @@
     "requeue-active": "tsx prisma/requeue-active.ts",
     "delete-failed": "tsx prisma/delete-failed.ts",
     "order-health": "tsx prisma/order-health.ts",
+    "audit-orders": "tsx prisma/audit-orders.ts",
+    "clean-ghosts": "tsx prisma/clean-ghosts.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

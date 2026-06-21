@@ -38,7 +38,8 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       where: { boostType: { in: [...REACTION_TYPES] } },
       _sum: { quantity: true },
     }),
-    prisma.order.aggregate({ _sum: { cost: true } }),
+    // Total spend = only orders that actually reached the panel (were charged).
+    prisma.order.aggregate({ where: { providerOrderId: { not: null } }, _sum: { cost: true } }),
     // Distinct post URLs. Use a server-side groupBy (count of groups) instead of
     // pulling every order's postUrl into memory — the old findMany scanned the
     // whole orders collection and was the main dashboard slowdown.
@@ -115,7 +116,7 @@ export async function getPanelSpending() {
   const [grouped, panels] = await Promise.all([
     prisma.order.groupBy({
       by: ["panelId"],
-      where: { status: { not: "FAILED" } },
+      where: { providerOrderId: { not: null } }, // only orders that were charged
       _sum: { cost: true },
       _count: true,
     }),
@@ -139,7 +140,7 @@ export async function getDailySpending(days = 30) {
   since.setHours(0, 0, 0, 0);
 
   const orders = await prisma.order.findMany({
-    where: { createdAt: { gte: since }, status: { not: "FAILED" } },
+    where: { createdAt: { gte: since }, providerOrderId: { not: null } },
     select: { createdAt: true, cost: true },
   });
 

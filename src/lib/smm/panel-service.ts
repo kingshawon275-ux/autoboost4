@@ -70,11 +70,11 @@ export async function syncBalance(panelId: string) {
   if (!panel) throw new Error("Panel not found");
 
   const client = new SmmClient(panel.apiUrl, panel.apiKey);
-  // A single slow/timed-out response shouldn't flap the panel to ERROR. Try a
-  // few times (short gaps) — only mark ERROR if it really can't be reached.
+  // One retry only — if a panel is genuinely slow, hammering it 3x just wastes
+  // time and loads the VPS. A single retry covers a momentary blip.
   let res = await client.balance();
-  for (let attempt = 0; attempt < 2 && !(res.ok && res.data); attempt++) {
-    await new Promise((r) => setTimeout(r, 1200));
+  if (!(res.ok && res.data)) {
+    await new Promise((r) => setTimeout(r, 1000));
     res = await client.balance();
   }
 
